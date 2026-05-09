@@ -42,7 +42,8 @@ def _dirichlet_around(target_idx: int, n_classes: int, sharpness: float) -> np.n
 
 
 def synthesize_sample(rng: np.random.Generator, profile: str) -> tuple[np.ndarray, float, float]:
-    """One synthetic 21-dim sample for one of {high, mid, low} confidence profiles."""
+    """One synthetic 21-dim sample. Targets are calibrated so 50 is a passable
+    answer, 70 is good, 85+ is excellent. Bad behaviour pulls scores down hard."""
     if profile == "high":
         face_dist = rng.choice(["neutral", "happy", "neutral", "happy"])
         voice_dist = rng.choice(["neutral", "calm", "happy", "neutral"])
@@ -52,8 +53,8 @@ def synthesize_sample(rng: np.random.Generator, profile: str) -> tuple[np.ndarra
         filler_rate = rng.uniform(0.0, 0.02)
         hedge_rate = rng.uniform(0.0, 0.02)
         lang_conf = rng.uniform(75, 100)
-        confidence = rng.uniform(75, 95)
-        engagement = rng.uniform(78, 95)
+        confidence = rng.uniform(70, 90)
+        engagement = rng.uniform(72, 90)
     elif profile == "mid":
         face_dist = rng.choice(["neutral", "happy", "surprised"])
         voice_dist = rng.choice(["neutral", "calm", "surprised"])
@@ -63,8 +64,8 @@ def synthesize_sample(rng: np.random.Generator, profile: str) -> tuple[np.ndarra
         filler_rate = rng.uniform(0.02, 0.08)
         hedge_rate = rng.uniform(0.02, 0.06)
         lang_conf = rng.uniform(45, 75)
-        confidence = rng.uniform(45, 70)
-        engagement = rng.uniform(45, 70)
+        confidence = rng.uniform(35, 60)
+        engagement = rng.uniform(38, 60)
     else:
         face_dist = rng.choice(["fearful", "sad", "angry", "disgusted"])
         voice_dist = rng.choice(["fearful", "sad", "angry"])
@@ -74,8 +75,8 @@ def synthesize_sample(rng: np.random.Generator, profile: str) -> tuple[np.ndarra
         filler_rate = rng.uniform(0.06, 0.18)
         hedge_rate = rng.uniform(0.05, 0.15)
         lang_conf = rng.uniform(10, 50)
-        confidence = rng.uniform(10, 45)
-        engagement = rng.uniform(15, 45)
+        confidence = rng.uniform(5, 30)
+        engagement = rng.uniform(8, 30)
 
     face_idx = EMOTION_CLASSES.index(face_dist)
     voice_idx = VOICE_CLASSES.index(voice_dist)
@@ -102,7 +103,9 @@ def synthesize_sample(rng: np.random.Generator, profile: str) -> tuple[np.ndarra
 
 def build_dataset(n: int = 10_000, seed: int = 42):
     rng = np.random.default_rng(seed)
-    profiles = rng.choice(["high", "mid", "low"], size=n, p=[0.34, 0.33, 0.33])
+    # Bias toward harsher distribution. Real interview answers cluster around
+    # mid/low, not high.
+    profiles = rng.choice(["high", "mid", "low"], size=n, p=[0.25, 0.40, 0.35])
     X, y_conf, y_eng = [], [], []
     for p in profiles:
         feat, c, e = synthesize_sample(rng, p)

@@ -185,16 +185,51 @@ export default function Analysis() {
                   <div className={styles.qaCategory}>
                     {q.category} &middot; {q.difficulty} &middot; {q.answered_seconds}s spoken
                     {q.target_seconds ? ` of ${q.target_seconds}s target` : ''}
+                    {q.self_rating ? ` · self-rated ${q.self_rating}/5` : ''}
                   </div>
                   <div className={styles.qaQuestion}>{q.text}</div>
                   <div className={styles.qaCategory} style={{ marginTop: 4 }}>
                     {q.word_count} words &middot; {q.filler_count} fillers
                   </div>
                 </div>
-                <div className={styles.qaCategory}>confidence</div>
+                <button
+                  type="button"
+                  className={styles.practiceButton}
+                  onClick={() => navigate('/session', { state: { questions: [{
+                    id: q.question_id,
+                    text: q.text,
+                    category: q.category,
+                    difficulty: q.difficulty,
+                    target_seconds: q.target_seconds,
+                  }], mode: 'replay' } })}
+                >
+                  Practice again
+                </button>
                 <div className={styles.qaScore}>{Math.round(q.avg_confidence)}</div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {analysis.bookmarks && analysis.bookmarks.length > 0 && (
+        <div className={styles.section}>
+          <span className={styles.sectionTitle}>Bookmarked moments</span>
+          <div className={styles.qaList}>
+            {analysis.bookmarks.map((b, i) => {
+              const baseTs = timeline?.frames?.[0]?.timestamp || 0
+              const offset = Math.max(0, b.timestamp - baseTs)
+              return (
+                <div key={i} className={styles.qaItem}>
+                  <div>
+                    <div className={styles.qaCategory}>{b.label}</div>
+                    <div className={styles.qaQuestion}>{b.note || 'No note'}</div>
+                  </div>
+                  <div className={styles.qaCategory}>marked at</div>
+                  <div className={styles.qaScore}>{fmtTime(offset)}</div>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { LineChart, Line, ResponsiveContainer, YAxis } from 'recharts'
 import { getQuestionSet, listQuestionCategories, listSessions } from '../api/client'
 import { useMediaDevices } from '../hooks/useMediaDevices'
 import { SkeletonCard } from '../components/Skeleton'
@@ -15,6 +16,54 @@ const FEATURES = [
   ['07', 'Eye contact and head pose', 'Yaw, pitch, smile and looking-at-camera percentage tracked across the session and charted over time.'],
   ['08', 'Persistent past sessions', 'Every session is stored in SQLite. Walk back through old runs, compare moments, and watch your trend.'],
 ]
+
+function TrendCard({ sessions }) {
+  const chartData = useMemo(() => {
+    return [...sessions]
+      .filter((s) => s.ended_at)
+      .sort((a, b) => a.ended_at - b.ended_at)
+      .map((s, i) => ({
+        i,
+        confidence: Math.round(s.avg_confidence),
+        engagement: Math.round(s.avg_engagement),
+      }))
+  }, [sessions])
+
+  const last = chartData[chartData.length - 1]
+  const first = chartData[0]
+  const delta = last && first ? last.confidence - first.confidence : 0
+  const arrow = delta > 0 ? '↑' : delta < 0 ? '↓' : '→'
+
+  return (
+    <div className={styles.trendCard}>
+      <div className={styles.trendStats}>
+        <div>
+          <div className={styles.trendValue}>{last?.confidence ?? 0}</div>
+          <div className={styles.trendLabel}>Last session</div>
+        </div>
+        <div>
+          <div className={styles.trendValue}>
+            {arrow} {Math.abs(delta)}
+          </div>
+          <div className={styles.trendLabel}>Vs. first session</div>
+        </div>
+        <div>
+          <div className={styles.trendValue}>{chartData.length}</div>
+          <div className={styles.trendLabel}>Sessions logged</div>
+        </div>
+      </div>
+      <div className={styles.trendChart}>
+        <ResponsiveContainer>
+          <LineChart data={chartData} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
+            <YAxis hide domain={[0, 100]} />
+            <Line type="monotone" dataKey="confidence" stroke="var(--confidence-high)" strokeWidth={1.5} dot={{ r: 2 }} isAnimationActive={false} />
+            <Line type="monotone" dataKey="engagement" stroke="var(--engagement)" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  )
+}
 
 function formatDate(ts) {
   if (!ts) return ''
@@ -151,6 +200,13 @@ export default function Home() {
           ))}
         </div>
       </section>
+
+      {sessions && sessions.length >= 2 && (
+        <section className={styles.section}>
+          <span className={styles.sectionLabel}>Confidence trend</span>
+          <TrendCard sessions={sessions} />
+        </section>
+      )}
 
       <section className={styles.section}>
         <span className={styles.sectionLabel}>Past sessions</span>

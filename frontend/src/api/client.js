@@ -68,3 +68,10 @@ export function recordFaceTicks(sessionId, ticks) {
     body: JSON.stringify({ ticks }),
   })
 }
+
+export function addBookmark(sessionId, payload) {
+  return request(`/api/session/${sessionId}/bookmark`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}

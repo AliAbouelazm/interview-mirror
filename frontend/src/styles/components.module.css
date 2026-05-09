@@ -376,6 +376,48 @@
   margin-top: var(--space-2);
 }
 
+.ratingRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.ratingLabel {
+  font-size: 10px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-family: var(--font-mono);
+}
+
+.ratingButtons {
+  display: flex;
+  gap: 4px;
+}
+
+.ratingButton {
+  width: 28px;
+  height: 28px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+}
+
+.ratingButton:hover { border-color: var(--accent); color: var(--text-primary); }
+
+.ratingButtonActive {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
 .questionButton {
   background: var(--surface-raised);
   border: 1px solid var(--border);

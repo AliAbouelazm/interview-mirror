@@ -12,9 +12,11 @@ export default function QuestionPanel({
   questions,
   index,
   startedAt,
+  rating,
   onNext,
   onPrev,
   onSkip,
+  onRate,
 }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -53,6 +55,23 @@ export default function QuestionPanel({
       <div className={styles.questionMeta}>
         <span>Question {index + 1} of {questions.length}</span>
       </div>
+
+      <div className={styles.ratingRow}>
+        <span className={styles.ratingLabel}>Self-rate this answer</span>
+        <div className={styles.ratingButtons}>
+          {[1, 2, 3, 4, 5].map((n) => (
+            <button
+              key={n}
+              type="button"
+              className={`${styles.ratingButton} ${rating === n ? styles.ratingButtonActive : ''}`}
+              onClick={() => onRate && onRate(n)}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className={styles.questionActions}>
         <button type="button" className={styles.questionButton} onClick={onPrev} disabled={index === 0}>Prev</button>
         <button type="button" className={styles.questionButton} onClick={onSkip}>Skip</button>

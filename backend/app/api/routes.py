@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.api.schemas import (
     AnalysisResponse,
+    BookmarkRequest,
     EndSessionResponse,
     FaceMetricsBatch,
     HealthResponse,
@@ -148,6 +149,15 @@ async def record_face_ticks(session_id: str, batch: FaceMetricsBatch, request: R
         raise HTTPException(status_code=404, detail="Session not active")
     await store.record_face_ticks(session_id, [t.model_dump() for t in batch.ticks])
     return {"status": "ok", "received": len(batch.ticks)}
+
+
+@router.post("/session/{session_id}/bookmark")
+async def add_bookmark(session_id: str, req: BookmarkRequest, request: Request):
+    store = request.app.state.session_store
+    if not store.is_live(session_id):
+        raise HTTPException(status_code=404, detail="Session not active")
+    await store.add_bookmark(session_id, req.model_dump())
+    return {"status": "ok"}
 
 
 @router.get("/health", response_model=HealthResponse)

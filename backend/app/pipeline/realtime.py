@@ -137,6 +137,12 @@ class RealtimeOrchestrator:
         self.last_transcript_at = 0.0
         self.actual_cycle_ms = float(target_cycle_ms)
         self.in_flight_transcription = False
+        self.latest_face_metrics: dict | None = None
+        self.last_speech_at = time.time()
+        self.session_start = time.time()
+
+    def update_face_metrics(self, metrics: dict) -> None:
+        self.latest_face_metrics = metrics
 
     def push_audio(self, pcm: np.ndarray) -> None:
         self.audio_ring.push(pcm)
@@ -215,6 +221,57 @@ class RealtimeOrchestrator:
         )
         confidence, engagement = self.fusion.predict_vec(feat)
         fusion_ms = (time.perf_counter() - t0) * 1000.0
+
+        # Hard post-fusion penalties. These reflect objective bad behaviour the
+        # fusion model alone is too soft about.
+        if voice_result.get("speaking", False):
+            self.last_speech_at = cycle_start
+        silence_seconds = cycle_start - self.last_speech_at
+        in_warmup = (cycle_start - self.session_start) < 5.0
+
+        confidence_penalty = 0.0
+        engagement_penalty = 0.0
+
+        if face_result["signal"] in ("nervous", "tense"):
+            confidence_penalty += 8.0
+            engagement_penalty += 5.0
+        if voice_result["signal"] in ("nervous", "tense"):
+            confidence_penalty += 8.0
+            engagement_penalty += 5.0
+        if filler_rate > 0.10:
+            confidence_penalty += min(15.0, (filler_rate - 0.10) * 100)
+        if hedge_rate > 0.06:
+            confidence_penalty += min(10.0, (hedge_rate - 0.06) * 100)
+        if lang_conf_session < 50:
+            confidence_penalty += (50 - lang_conf_session) * 0.4
+        if not in_warmup and silence_seconds > 4.0:
+            confidence_penalty += min(15.0, (silence_seconds - 4.0) * 2.0)
+            engagement_penalty += min(20.0, (silence_seconds - 4.0) * 3.0)
+
+        fm = self.latest_face_metrics or {}
+        looking = fm.get("looking_at_camera")
+        eye_open = fm.get("eye_openness")
+        smile = fm.get("smile")
+        head_yaw = abs(fm.get("head_yaw", 0.0))
+        head_pitch = abs(fm.get("head_pitch", 0.0))
+        face_detected = face_result.get("face_detected", False)
+
+        if not face_detected:
+            confidence_penalty += 12.0
+            engagement_penalty += 18.0
+        else:
+            if looking is not None and looking < 0.6:
+                confidence_penalty += (0.6 - looking) * 30
+                engagement_penalty += (0.6 - looking) * 35
+            if eye_open is not None and eye_open < 0.35:
+                confidence_penalty += 6.0
+            if head_yaw + head_pitch > 0.55:
+                confidence_penalty += min(10.0, (head_yaw + head_pitch - 0.55) * 25)
+            if smile is not None and smile < 0.02 and face_result["signal"] != "engaged":
+                engagement_penalty += 4.0
+
+        confidence = max(0.0, min(100.0, confidence - confidence_penalty))
+        engagement = max(0.0, min(100.0, engagement - engagement_penalty))
 
         total_ms = (time.perf_counter() - cycle_start) * 1000.0
         if total_ms > self.target_cycle_ms:

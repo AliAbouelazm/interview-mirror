@@ -262,14 +262,29 @@ def _gen_insights(
         })
 
     nervous_pct = face["distribution"].get("nervous", 0)
-    if nervous_pct > 25:
+    tense_pct = face["distribution"].get("tense", 0)
+    if nervous_pct + tense_pct > 25:
+        worst = "nervous" if nervous_pct >= tense_pct else "tense"
         insights.append({
-            "title": f"You looked nervous in {nervous_pct}% of frames",
+            "title": f"You looked {worst} in {round(nervous_pct + tense_pct, 1)}% of frames",
             "body": (
-                "When you noticed yourself stalling, your face shifted into a nervous pattern. "
-                "Pausing to breathe before answering, even for one second, often resets this."
+                "More than a quarter of the session your face was reading as nervous or tense. "
+                "Recruiters pick up on this within seconds. Pause and reset before answering, "
+                "even for a beat, and watch the percentage in your next session."
             ),
             "metric": "face",
+        })
+
+    overall_low = overall["avg_confidence"] < 50 and len(frames) > 0
+    if overall_low:
+        insights.append({
+            "title": f"Overall confidence sat at {overall['avg_confidence']}",
+            "body": (
+                "This score reflects signal-level reads of your face, voice, and language together. "
+                "Below 50 means a recruiter would likely flag this answer as underwhelming. "
+                "Pick the single weakest moment above and rehearse it three times before your next attempt."
+            ),
+            "metric": "trend",
         })
 
     if overall["trend"] == "declining" and overall["avg_confidence"] >= 50:

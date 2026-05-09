@@ -50,6 +50,15 @@ class SessionConnection:
                     pcm = decode_pcm_b64(data.get("samples", ""))
                     if pcm is not None and pcm.size > 0:
                         self.orchestrator.push_audio(pcm)
+                elif msg_type == "face_metrics":
+                    self.orchestrator.update_face_metrics({
+                        "head_yaw": float(data.get("head_yaw", 0.0)),
+                        "head_pitch": float(data.get("head_pitch", 0.0)),
+                        "head_roll": float(data.get("head_roll", 0.0)),
+                        "eye_openness": float(data.get("eye_openness", 1.0)),
+                        "smile": float(data.get("smile", 0.0)),
+                        "looking_at_camera": float(data.get("looking_at_camera", 1.0)),
+                    })
                 elif msg_type == "ping":
                     await self.ws.send_text(json.dumps({"type": "pong", "ts": time.time()}))
         except WebSocketDisconnect:

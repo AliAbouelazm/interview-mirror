@@ -117,6 +117,13 @@ class PerQuestionItem(BaseModel):
     avg_engagement: float
     word_count: int
     filler_count: int
+    self_rating: Optional[int] = None
+
+
+class BookmarkItem(BaseModel):
+    timestamp: float
+    label: str = "moment"
+    note: str = ""
 
 
 class FaceDynamicsBlock(BaseModel):
@@ -143,6 +150,7 @@ class AnalysisResponse(BaseModel):
     insights: list[InsightItem]
     per_question: list[PerQuestionItem] = Field(default_factory=list)
     face_dynamics: FaceDynamicsBlock = Field(default_factory=FaceDynamicsBlock)
+    bookmarks: list[BookmarkItem] = Field(default_factory=list)
 
 
 class SessionListItem(BaseModel):
@@ -193,6 +201,13 @@ class QuestionEventRequest(BaseModel):
     question_id: str = Field(min_length=1, max_length=64)
     started_at: float
     ended_at: Optional[float] = None
+    self_rating: Optional[int] = Field(default=None, ge=1, le=5)
+
+
+class BookmarkRequest(BaseModel):
+    timestamp: float
+    note: str = Field(default="", max_length=200)
+    label: str = Field(default="moment", max_length=40)
 
 
 class FaceMetricsTick(BaseModel):

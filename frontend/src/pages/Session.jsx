@@ -10,7 +10,7 @@ import { useMediaDevices } from '../hooks/useMediaDevices'
 import { useSession } from '../hooks/useSession'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useFaceMesh } from '../hooks/useFaceMesh'
-import { recordFaceTicks, recordQuestionEvent } from '../api/client'
+import { addBookmark, recordFaceTicks, recordQuestionEvent } from '../api/client'
 import styles from '../styles/session.module.css'
 
 const FRAME_INTERVAL_MS = 500
@@ -75,6 +75,12 @@ export default function Session() {
   const [elapsedMs, setElapsedMs] = useState(0)
   const [questionIdx, setQuestionIdx] = useState(0)
   const [questionStartedAt, setQuestionStartedAt] = useState(null)
+  const [questionRatings, setQuestionRatings] = useState({})
+  const [paused, setPaused] = useState(false)
+  const pausedRef = useRef(false)
+  useEffect(() => { pausedRef.current = paused }, [paused])
+  const [bookmarkCount, setBookmarkCount] = useState(0)
+  const [flashMark, setFlashMark] = useState(false)
   const startTsRef = useRef(null)
   const frameCanvasRef = useRef(null)
   const audioCtxRef = useRef(null)
@@ -139,6 +145,7 @@ export default function Session() {
   })
 
   // FaceMesh on the live video element
+  const lastSendRef = useRef(0)
   const handleFaceTick = useCallback((m) => {
     setLatestLandmarks(m.landmarks)
     tickBufferRef.current.push({
@@ -150,7 +157,22 @@ export default function Session() {
       smile: m.smile,
       looking_at_camera: m.looking_at_camera,
     })
-  }, [])
+    // Send live metrics to backend at most every 250ms so the realtime
+    // pipeline can apply eye-contact and head-pose penalties.
+    const now = performance.now()
+    if (now - lastSendRef.current > 250) {
+      lastSendRef.current = now
+      send({
+        type: 'face_metrics',
+        head_yaw: m.head_yaw,
+        head_pitch: m.head_pitch,
+        head_roll: m.head_roll,
+        eye_openness: m.eye_openness,
+        smile: m.smile,
+        looking_at_camera: m.looking_at_camera,
+      })
+    }
+  }, [send])
 
   useFaceMesh({ video: videoEl, enabled: !!videoEl && sessionStatus === 'active', onTick: handleFaceTick })
 
@@ -178,6 +200,7 @@ export default function Session() {
     const ctx = canvas.getContext('2d')
 
     const tick = () => {
+      if (paused) return
       try {
         if (videoEl.videoWidth > 0) {
           ctx.drawImage(videoEl, 0, 0, FRAME_TARGET_W, FRAME_TARGET_H)
@@ -188,7 +211,7 @@ export default function Session() {
     }
     const id = setInterval(tick, FRAME_INTERVAL_MS)
     return () => clearInterval(id)
-  }, [stream, sessionId, wsStatus, videoEl, send])
+  }, [stream, sessionId, wsStatus, videoEl, send, paused])
 
   // Stream PCM via AudioWorklet
   useEffect(() => {
@@ -204,6 +227,7 @@ export default function Session() {
           processorOptions: { targetRate: 22050, frameSize: 4096 },
         })
         node.port.onmessage = (ev) => {
+          if (pausedRef.current) return
           const buf = ev.data
           if (buf && buf.byteLength > 0) {
             send({ type: 'audio', samples: arrayBufferToBase64(buf) })
@@ -269,10 +293,41 @@ export default function Session() {
           question_id: cur.id,
           started_at: start / 1000,
           ended_at: Date.now() / 1000,
+          self_rating: questionRatings[cur.id] || null,
         })
       } catch {}
     }
     setQuestionIdx(nextIdx)
+  }
+
+  const handleRate = (rating) => {
+    const cur = questions[questionIdx]
+    if (!cur) return
+    setQuestionRatings((prev) => ({ ...prev, [cur.id]: rating }))
+    if (sessionId) {
+      recordQuestionEvent(sessionId, {
+        question_id: cur.id,
+        started_at: (questionStartedAt || Date.now()) / 1000,
+        ended_at: null,
+        self_rating: rating,
+      }).catch(() => {})
+    }
+  }
+
+  const handleMark = async () => {
+    if (!sessionId) return
+    const ts = Date.now() / 1000
+    const cur = questions[questionIdx]
+    setBookmarkCount((c) => c + 1)
+    setFlashMark(true)
+    setTimeout(() => setFlashMark(false), 600)
+    try {
+      await addBookmark(sessionId, {
+        timestamp: ts,
+        label: cur ? cur.category : 'moment',
+        note: cur ? cur.text.slice(0, 80) : '',
+      })
+    } catch {}
   }
 
   const ending = sessionStatus === 'ending'
@@ -304,6 +359,8 @@ export default function Session() {
           questions={questions}
           index={questionIdx}
           startedAt={questionStartedAt}
+          rating={questions[questionIdx] ? questionRatings[questions[questionIdx].id] : undefined}
+          onRate={handleRate}
           onPrev={() => handleQuestionAdvance(Math.max(0, questionIdx - 1))}
           onNext={() => handleQuestionAdvance(Math.min(questions.length - 1, questionIdx + 1))}
           onSkip={() => handleQuestionAdvance(Math.min(questions.length - 1, questionIdx + 1))}
@@ -361,6 +418,24 @@ export default function Session() {
         <div className={styles.cycleIndicator}>
           <span>Cycle {Math.round(cycleMs)}ms</span>
           <span>Frame {Math.round(totalLatency)}ms</span>
+        </div>
+        <div className={styles.actionRow}>
+          <button
+            type="button"
+            className={`${styles.controlButton} ${flashMark ? styles.controlButtonFlash : ''}`}
+            onClick={handleMark}
+            disabled={!sessionId}
+          >
+            Mark moment {bookmarkCount > 0 ? `(${bookmarkCount})` : ''}
+          </button>
+          <button
+            type="button"
+            className={`${styles.controlButton} ${paused ? styles.controlButtonActive : ''}`}
+            onClick={() => setPaused((p) => !p)}
+            disabled={!sessionId}
+          >
+            {paused ? 'Resume' : 'Pause'}
+          </button>
         </div>
         <button
           type="button"

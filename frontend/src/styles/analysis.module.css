@@ -218,6 +218,23 @@
   letter-spacing: -0.03em;
 }
 
+.practiceButton {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  transition: border-color 150ms ease, color 150ms ease;
+}
+
+.practiceButton:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
 .faceBreakdown {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));

@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS face_ticks (
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS bookmarks (
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    timestamp REAL NOT NULL,
+    label TEXT NOT NULL,
+    note TEXT,
+    PRIMARY KEY (session_id, seq),
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_frames_session ON frames(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
 CREATE INDEX IF NOT EXISTS idx_qevents_session ON question_events(session_id);
@@ -80,6 +90,7 @@ class LiveSession:
     seq: int = 0
     question_events: list[dict] = field(default_factory=list)
     face_ticks: list[dict] = field(default_factory=list)
+    bookmarks: list[dict] = field(default_factory=list)
 
 
 class SessionStore:
@@ -142,6 +153,12 @@ class SessionStore:
             return
         sess.face_ticks.extend(ticks)
 
+    async def add_bookmark(self, session_id: str, bookmark: dict) -> None:
+        sess = self._live.get(session_id)
+        if not sess:
+            return
+        sess.bookmarks.append(bookmark)
+
     async def end(self, session_id: str) -> Optional[dict]:
         sess = self._live.pop(session_id, None)
         if not sess:
@@ -150,6 +167,7 @@ class SessionStore:
         analysis = analyse_session(sess.frames, sess.started_at, ended_at)
         analysis["per_question"] = self._compute_per_question(sess)
         analysis["face_dynamics"] = self._compute_face_dynamics(sess)
+        analysis["bookmarks"] = list(sess.bookmarks)
         if self._db:
             await self._db.execute(
                 "UPDATE sessions SET ended_at=?, duration_seconds=?, avg_confidence=?, "
@@ -180,23 +198,54 @@ class SessionStore:
                     "VALUES (?, ?, ?, ?)",
                     (session_id, i, t.get("timestamp", 0), json.dumps(t)),
                 )
+            for i, b in enumerate(sess.bookmarks):
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO bookmarks(session_id, seq, timestamp, label, note) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, i, b.get("timestamp", 0), b.get("label", "moment"), b.get("note", "")),
+                )
             await self._db.commit()
         return analysis
 
     def _compute_per_question(self, sess: LiveSession) -> list[dict]:
+        """Merge multiple events per question (open + close) into one entry per qid."""
         from app.data.questions import get_question
-        per_q: list[dict] = []
+        from statistics import mean
+
+        merged: dict[str, dict] = {}
+        order: list[str] = []
         for ev in sess.question_events:
             qid = ev.get("question_id")
-            q = get_question(qid) if qid else None
+            if not qid:
+                continue
+            if qid not in merged:
+                merged[qid] = {
+                    "started_at": ev.get("started_at"),
+                    "ended_at": ev.get("ended_at"),
+                    "self_rating": ev.get("self_rating"),
+                }
+                order.append(qid)
+                continue
+            entry = merged[qid]
+            if ev.get("started_at") is not None:
+                entry["started_at"] = min(entry["started_at"] or ev["started_at"], ev["started_at"])
+            if ev.get("ended_at") is not None:
+                entry["ended_at"] = max(entry["ended_at"] or 0, ev["ended_at"])
+            if ev.get("self_rating") is not None:
+                entry["self_rating"] = ev["self_rating"]
+
+        per_q: list[dict] = []
+        last_ts = sess.frames[-1]["timestamp"] if sess.frames else 0
+        for qid in order:
+            q = get_question(qid)
             if q is None:
                 continue
-            start = ev.get("started_at", 0)
-            end = ev.get("ended_at") or sess.frames[-1]["timestamp"] if sess.frames else start
+            ev = merged[qid]
+            start = ev.get("started_at") or 0
+            end = ev.get("ended_at") or last_ts or start
             window = [f for f in sess.frames if start <= f.get("timestamp", 0) < end]
             if not window:
                 continue
-            from statistics import mean
             avg_conf = round(mean([f.get("confidence_score", 0) for f in window]), 1)
             avg_eng = round(mean([f.get("engagement_score", 0) for f in window]), 1)
             words = sum(len((f.get("transcript_chunk") or "").split()) for f in window)
@@ -212,6 +261,7 @@ class SessionStore:
                 "avg_engagement": avg_eng,
                 "word_count": words,
                 "filler_count": fillers,
+                "self_rating": ev.get("self_rating"),
             })
         return per_q
 
