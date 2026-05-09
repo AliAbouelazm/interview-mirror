@@ -1,13 +1,12 @@
 ---
 title: Interview Mirror
-emoji: M
 colorFrom: indigo
 colorTo: gray
 sdk: docker
 app_port: 7860
 pinned: false
 license: mit
-short_description: Real-time emotional intelligence feedback for mock interviews.
+short_description: Real-time feedback on how you come across in interviews.
 ---
 
 # Interview Mirror backend
