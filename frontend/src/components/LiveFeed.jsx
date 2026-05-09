@@ -14,6 +14,7 @@ const STATUS_DOT = {
   connecting: 'var(--confidence-mid)',
   disconnected: 'var(--confidence-low)',
   error: 'var(--confidence-low)',
+  lost: 'var(--confidence-low)',
   idle: 'var(--text-tertiary)',
 }
 
@@ -21,7 +22,8 @@ const STATUS_LABEL = {
   connected: 'Live',
   connecting: 'Connecting',
   disconnected: 'Reconnecting',
-  error: 'Lost',
+  error: 'Connection error',
+  lost: 'Connection lost - refresh page',
   idle: 'Idle',
 }
 
