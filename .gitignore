@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Datasets and large artifacts (not models)
+backend/data/
+backend/.cache/
+~/.cache/huggingface/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env
+frontend/.env.local
+
+# Env
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# Logs
+*.log
+logs/
+
+# Whisper model cache (auto-downloaded at runtime)
+backend/.whisper_cache/
