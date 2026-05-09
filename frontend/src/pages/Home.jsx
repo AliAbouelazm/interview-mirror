@@ -112,8 +112,8 @@ export default function Home() {
       <section className={styles.hero}>
         <span className={styles.eyebrow}>v1.0 / interview practice</span>
         <h1 className={styles.heading}>
-          Read the room.<br />
-          <span className={styles.headingHighlight}>Especially when the room is you.</span>
+          How they see you.<br />
+          <span className={styles.headingHighlight}>How they hear you.</span>
         </h1>
         <p className={styles.subheading}>
           Three independent emotion models score your face, your voice, and your words while you answer real interview
