@@ -55,17 +55,18 @@ Interview Mirror watches you during a mock interview through your webcam and mic
 
 ## Face model
 
-- Dataset: FER-2013 from HuggingFace mirror `clip-benchmark/wds_fer2013`. 35,887 labelled 48x48 grayscale faces in 7 classes (neutral, happy, sad, angry, fearful, surprised, disgusted).
-- Architecture: 3 conv blocks (1->32->64->128) with batchnorm and 2x2 max pool, dropout 0.5, 256-unit FC, dropout 0.3, 7-class head.
-- Training: 50 epochs, Adam lr 1e-3 weight decay 1e-4, cosine annealing, balanced class weights, augmentation with horizontal flip, 10 degree rotation, color jitter. Early stopping on val F1 macro with patience 8.
-- Test metrics: see `backend/saved_models/face_best.metrics.json` after training. Run `python -m app.models.face.train` to reproduce.
+- Dataset: FER-2013 from HuggingFace mirror `clip-benchmark/wds_fer2013`. 35,887 labelled 48x48 grayscale faces across 7 classes (neutral, happy, sad, angry, fearful, surprised, disgusted).
+- Architecture: VGG-style from-scratch CNN, four double-conv blocks (1 -> 64 -> 128 -> 256 -> 512) with batch norm and 2x2 max pooling, global average pool, 256-unit FC head with dropout 0.5. About 4.8M parameters.
+- Training: 80 epochs, Adam lr 1e-3 weight decay 5e-4, cosine annealing, balanced class weights with label smoothing 0.05. Augmentation includes random horizontal flip, affine warp, colour jitter, padded random crop, and random erasing. MixUp regulariser (alpha 0.2) on every batch. Early stopping on val F1 macro with patience 12.
+- Test metrics: f1_macro 0.6509, accuracy 0.6726 on the 3,589-sample held-out split (per-class breakdown saved alongside the checkpoint). Run `python -m app.models.face.train` to reproduce.
 
 ## Voice model
 
-- Dataset: RAVDESS from HuggingFace, 1,440 audio files in 8 classes (neutral, calm, happy, sad, angry, fearful, disgusted, surprised).
-- Architecture: 3 conv blocks over the 128x130 log-mel spectrogram, global average pool, concatenation with 80 statistical features (40 MFCC means + 40 MFCC stds + 6 acoustic descriptors), 256-unit FC, 8-class head.
-- Training: same optimizer schedule as face. Augmentation through gaussian noise injection and time-shift roll.
-- Test metrics: see `backend/saved_models/voice_best.metrics.json` after training. Run `python -m app.models.voice.train` to reproduce.
+- Datasets combined: RAVDESS (1,440 clips, 8 emotions) and CREMA-D (7,442 clips, 6 emotions). 8,882 clips total covering all 8 of our target classes. CREMA-D drives the bulk of the training signal for the six core emotions; RAVDESS supplies the only labelled examples of "calm" and "surprised".
+- Features: 128x130 log-mel spectrogram plus an 80-dim statistical vector (40 MFCC means + 40 MFCC stds + descriptor padding). Statistical vector is per-sample z-scored in the loader and again LayerNorm'd inside the model so train/eval distributions match.
+- Architecture: four double-conv blocks (1 -> 64 -> 128 -> 256 -> 512) over the spectrogram, global average pool, concatenation with the LayerNorm'd 80-d stat vector, 256-unit FC head. About 4.8M parameters.
+- Training: 80 epochs, Adam lr 3e-4 weight decay 5e-4, cosine annealing, balanced class weights with label smoothing 0.05. Augmentation includes gaussian noise injection, time-shift roll, and SpecAugment (time and frequency masks). Early stopping on val F1 macro with patience 12.
+- Test metrics: f1_macro 0.5606, accuracy 0.5629 on the 1,336-sample held-out split. Run `python -m app.models.voice.train` to reproduce.
 
 ## Fusion model
 

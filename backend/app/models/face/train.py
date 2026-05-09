@@ -1,5 +1,8 @@
 """
-Train face emotion CNN on FER-2013 (HuggingFace, no auth required).
+Train face emotion CNN from scratch on FER-2013 (HuggingFace).
+
+Architecture is a 4-block VGG-style network. Trained with Adam + cosine LR,
+strong augmentation, MixUp regulariser, and class-balanced cross-entropy.
 
 Usage:
     python -m app.models.face.train
@@ -14,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
@@ -136,16 +140,28 @@ def split_dataset(ds_dict):
     return a["train"], b["train"], b["test"]
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def _mixup(x: torch.Tensor, y: torch.Tensor, alpha: float = 0.2):
+    """Standard MixUp. Returns mixed x, two label tensors, and the lambda weight."""
+    if alpha <= 0:
+        return x, y, y, 1.0
+    lam = np.random.beta(alpha, alpha)
+    lam = max(lam, 1 - lam)
+    perm = torch.randperm(x.size(0), device=x.device)
+    x_mix = lam * x + (1 - lam) * x[perm]
+    return x_mix, y, y[perm], float(lam)
+
+
+def train_one_epoch(model, loader, criterion, optimizer, device, mixup_alpha: float = 0.2):
     model.train()
     total_loss = 0.0
     n = 0
     for images, labels in tqdm(loader, desc="train", leave=False):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+        x, ya, yb, lam = _mixup(images, labels, alpha=mixup_alpha)
         optimizer.zero_grad()
-        logits = model(images)
-        loss = criterion(logits, labels)
+        logits = model(x)
+        loss = lam * criterion(logits, ya) + (1 - lam) * criterion(logits, yb)
         loss.backward()
         optimizer.step()
         total_loss += loss.item() * images.size(0)
@@ -180,12 +196,13 @@ def evaluate(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--patience", type=int, default=8)
+    parser.add_argument("--weight-decay", type=float, default=5e-4)
+    parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--mixup-alpha", type=float, default=0.2)
     parser.add_argument("--out", type=str, default="saved_models/face_best.pt")
     args = parser.parse_args()
 
@@ -195,13 +212,16 @@ def main():
     ds_dict, ds_name = load_fer_splits()
     train_raw, val_raw, test_raw = split_dataset(ds_dict)
 
+    # Stronger augmentation: random crops, flips, affine, contrast jitter, random erasing.
     train_tf = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.Resize((48, 48)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.95, 1.05)),
+        transforms.ColorJitter(brightness=0.25, contrast=0.25),
+        transforms.RandomCrop(48, padding=4, padding_mode="reflect"),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5], std=[0.5]),
+        transforms.RandomErasing(p=0.25, scale=(0.02, 0.15)),
     ])
     eval_tf = transforms.Compose([
         transforms.Resize((48, 48)),
@@ -233,7 +253,7 @@ def main():
     train_labels = [r["label"] for r in train_set.records]
     cw = compute_class_weight("balanced", classes=np.arange(len(EMOTION_CLASSES)), y=train_labels)
     weight_tensor = torch.tensor(cw, dtype=torch.float32, device=device)
-    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+    criterion = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.05)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
@@ -248,7 +268,8 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device,
+                                     mixup_alpha=args.mixup_alpha)
         val = evaluate(model, val_loader, criterion, device)
         scheduler.step()
         epoch_time = time.time() - t0
@@ -299,6 +320,7 @@ def main():
         "test_per_class": report,
         "history": history,
         "classes": EMOTION_CLASSES,
+        "params": int(sum(p.numel() for p in model.parameters())),
     }
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
