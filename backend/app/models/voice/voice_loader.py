@@ -76,6 +76,8 @@ def statistical_features(audio: np.ndarray) -> np.ndarray:
         feats = np.pad(feats, (0, STAT_FEATURES - feats.shape[0]))
     elif feats.shape[0] > STAT_FEATURES:
         feats = feats[:STAT_FEATURES]
+    # Per-sample z-score keeps the FC head's input distribution stable across clips.
+    feats = (feats - feats.mean()) / (feats.std() + 1e-6)
     return feats
 
 

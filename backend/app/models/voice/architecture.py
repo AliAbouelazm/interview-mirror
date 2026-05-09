@@ -44,6 +44,11 @@ class VoiceEmotionCNN(nn.Module):
         self.dropout_conv = nn.Dropout(0.3)
         self.gap = nn.AdaptiveAvgPool2d(1)
 
+        # Normalise the auxiliary statistical features so they sit on the same
+        # scale as the BN-normalised convolutional features going into fc1.
+        # LayerNorm is batch-independent so it behaves the same in train and eval,
+        # which matters with only ~30 batches per epoch on RAVDESS.
+        self.stats_norm = nn.LayerNorm(stat_features)
         self.fc1 = nn.Linear(128 + stat_features, 256)
         self.dropout_fc = nn.Dropout(0.3)
         self.fc2 = nn.Linear(256, num_classes)
@@ -54,6 +59,7 @@ class VoiceEmotionCNN(nn.Module):
         x = F.relu(self.bn3(self.conv3(x)))
         x = self.dropout_conv(x)
         x = self.gap(x).flatten(1)
+        stats = self.stats_norm(stats)
         x = torch.cat([x, stats], dim=1)
         x = F.relu(self.fc1(x))
         x = self.dropout_fc(x)

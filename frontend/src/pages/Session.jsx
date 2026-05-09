@@ -166,10 +166,8 @@ export default function Session() {
           }
         }
         source.connect(node)
-        node.connect(audioCtx.destination)
         const silentGain = audioCtx.createGain()
         silentGain.gain.value = 0
-        node.disconnect()
         node.connect(silentGain)
         silentGain.connect(audioCtx.destination)
         audioCtxRef.current = audioCtx

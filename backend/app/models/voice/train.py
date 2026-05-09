@@ -73,20 +73,41 @@ def split_dataset(ds_dict):
     return a["train"], b["train"], b["test"]
 
 
+STRING_LABEL_ALIASES = {
+    "neutral": "neutral",
+    "calm": "calm",
+    "happy": "happy", "happiness": "happy",
+    "sad": "sad", "sadness": "sad",
+    "angry": "angry", "anger": "angry",
+    "fearful": "fearful", "fear": "fearful",
+    "disgusted": "disgusted", "disgust": "disgusted",
+    "surprised": "surprised", "surprise": "surprised",
+}
+
+
+def _resolve_string_label(s: str) -> int | None:
+    s = s.strip().lower()
+    if s in STRING_LABEL_ALIASES:
+        return LABEL_TO_IDX.get(STRING_LABEL_ALIASES[s])
+    if s in LABEL_TO_IDX:
+        return LABEL_TO_IDX[s]
+    return None
+
+
 def parse_label(row) -> int | None:
     """RAVDESS HF rows usually have either an explicit label, an emotion id, or a parseable filename."""
     if "label" in row and row["label"] is not None:
         v = row["label"]
         if isinstance(v, str):
-            v = v.strip().lower()
-            return LABEL_TO_IDX.get(v)
-        ravdess_id = int(v) + 1 if int(v) < 8 else int(v)
+            return _resolve_string_label(v)
+        n = int(v)
+        ravdess_id = n + 1 if 0 <= n <= 7 else n
         name = RAVDESS_TO_OURS.get(ravdess_id)
         return LABEL_TO_IDX.get(name) if name else None
     if "emotion" in row and row["emotion"] is not None:
         e = row["emotion"]
         if isinstance(e, str):
-            return LABEL_TO_IDX.get(e.strip().lower())
+            return _resolve_string_label(e)
         return LABEL_TO_IDX.get(RAVDESS_TO_OURS.get(int(e)))
     path = row.get("audio", {}).get("path") if isinstance(row.get("audio"), dict) else None
     if path:
@@ -192,7 +213,7 @@ def main():
     train_raw, val_raw, test_raw = split_dataset(ds_dict)
 
     print("Building feature cache (this can take a few minutes)...")
-    train_set = RAVDESSDataset(train_raw, augment=True)
+    train_set = RAVDESSDataset(train_raw, augment=False)
     val_set = RAVDESSDataset(val_raw, augment=False)
     test_set = RAVDESSDataset(test_raw, augment=False)
     print(f"Splits: train={len(train_set)} val={len(val_set)} test={len(test_set)}")
