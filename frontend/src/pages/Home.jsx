@@ -12,6 +12,8 @@ const FEATURES = [
   ['04', 'Filler and hedge detection', 'Whisper transcribes you in 5-second windows; rule-based parsers flag filler words and hedging language as you speak.'],
   ['05', 'Per-question breakdown', 'After the session, every question gets its own confidence, engagement, word count, and filler line.'],
   ['06', 'Actionable insights', 'Each insight cites a real timestamp or measurement. No template advice.'],
+  ['07', 'Eye contact and head pose', 'Yaw, pitch, smile and looking-at-camera percentage tracked across the session and charted over time.'],
+  ['08', 'Persistent past sessions', 'Every session is stored in SQLite. Walk back through old runs, compare moments, and watch your trend.'],
 ]
 
 function formatDate(ts) {
@@ -92,17 +94,24 @@ export default function Home() {
         </div>
 
         <div className={styles.modeSelector}>
-          <span className={styles.modeSelectorLabel}>Number of questions</span>
-          <div className={styles.modeSelectorRow}>
-            {[3, 5, 8, 12].map((n) => (
-              <button
-                key={n}
-                className={`${styles.modeButton} ${questionCount === n ? styles.modeButtonActive : ''}`}
-                onClick={() => setQuestionCount(n)}
-              >
-                {n}
-              </button>
-            ))}
+          <div className={styles.sliderHeader}>
+            <span className={styles.modeSelectorLabel}>Number of questions</span>
+            <span className={styles.sliderValue}>{questionCount}</span>
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={15}
+            step={1}
+            value={questionCount}
+            onChange={(e) => setQuestionCount(Number(e.target.value))}
+            className={styles.slider}
+          />
+          <div className={styles.sliderTicks}>
+            <span>1</span>
+            <span>5</span>
+            <span>10</span>
+            <span>15</span>
           </div>
         </div>
 

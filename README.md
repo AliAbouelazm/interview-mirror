@@ -55,18 +55,18 @@ Interview Mirror watches you during a mock interview through your webcam and mic
 
 ## Face model
 
-- Dataset: FER-2013 from HuggingFace mirror `clip-benchmark/wds_fer2013`. 35,887 labelled 48x48 grayscale faces across 7 classes (neutral, happy, sad, angry, fearful, surprised, disgusted).
+- Dataset: FER+ relabels of FER-2013 from `deanngkl/ferplus-7cls`. 35,481 labelled 48x48 grayscale faces across 7 classes (neutral, happy, sad, angry, fearful, surprised, disgusted). FER+ uses majority-vote labels from 10 human annotators per image, which is meaningfully cleaner than the original single-annotator FER-2013 labels.
 - Architecture: VGG-style from-scratch CNN, four double-conv blocks (1 -> 64 -> 128 -> 256 -> 512) with batch norm and 2x2 max pooling, global average pool, 256-unit FC head with dropout 0.5. About 4.8M parameters.
-- Training: 80 epochs, Adam lr 1e-3 weight decay 5e-4, cosine annealing, balanced class weights with label smoothing 0.05. Augmentation includes random horizontal flip, affine warp, colour jitter, padded random crop, and random erasing. MixUp regulariser (alpha 0.2) on every batch. Early stopping on val F1 macro with patience 12.
-- Test metrics: f1_macro 0.6509, accuracy 0.6726 on the 3,589-sample held-out split (per-class breakdown saved alongside the checkpoint). Run `python -m app.models.face.train` to reproduce.
+- Training: 120 epochs, Adam lr 1e-3 weight decay 5e-4, linear warmup for 5 epochs then cosine annealing, balanced class weights with label smoothing 0.05. Augmentation includes random horizontal flip, affine warp, colour jitter, padded random crop, and random erasing. MixUp + CutMix on every batch (50/50 split). EMA weights with decay 0.999 used for the saved checkpoint. Test-time augmentation (centre + horizontal flip) at evaluation. Early stopping on val F1 macro with patience 20.
+- Test metrics: f1_macro 0.6684, accuracy 0.7843 on the 5,321-sample held-out FER+ split (per-class breakdown saved alongside the checkpoint). Run `python -m app.models.face.train` to reproduce.
 
 ## Voice model
 
-- Datasets combined: RAVDESS (1,440 clips, 8 emotions) and CREMA-D (7,442 clips, 6 emotions). 8,882 clips total covering all 8 of our target classes. CREMA-D drives the bulk of the training signal for the six core emotions; RAVDESS supplies the only labelled examples of "calm" and "surprised".
+- Datasets combined: RAVDESS (1,440 clips, 8 emotions), CREMA-D (7,442 clips, 6 emotions), and SAVEE (480 clips, 7 emotions). 9,362 clips total covering all 8 of our target classes. CREMA-D drives the bulk of the training signal for the six core emotions; RAVDESS supplies "calm"; RAVDESS and SAVEE together cover "surprised".
 - Features: 128x130 log-mel spectrogram plus an 80-dim statistical vector (40 MFCC means + 40 MFCC stds + descriptor padding). Statistical vector is per-sample z-scored in the loader and again LayerNorm'd inside the model so train/eval distributions match.
 - Architecture: four double-conv blocks (1 -> 64 -> 128 -> 256 -> 512) over the spectrogram, global average pool, concatenation with the LayerNorm'd 80-d stat vector, 256-unit FC head. About 4.8M parameters.
-- Training: 80 epochs, Adam lr 3e-4 weight decay 5e-4, cosine annealing, balanced class weights with label smoothing 0.05. Augmentation includes gaussian noise injection, time-shift roll, and SpecAugment (time and frequency masks). Early stopping on val F1 macro with patience 12.
-- Test metrics: f1_macro 0.5606, accuracy 0.5629 on the 1,336-sample held-out split. Run `python -m app.models.voice.train` to reproduce.
+- Training: 120 epochs, Adam lr 3e-4 weight decay 5e-4, linear warmup for 5 epochs then cosine annealing, balanced class weights with label smoothing 0.05. Augmentation includes gaussian noise injection, time-shift roll, and SpecAugment (time and frequency masks); MixUp on the cached mel + stat tensors at every batch. EMA weights with decay 0.999 used for the saved checkpoint. Early stopping on val F1 macro with patience 20.
+- Test metrics: f1_macro 0.6721, accuracy 0.6570 on the 1,408-sample held-out split. Run `python -m app.models.voice.train` to reproduce.
 
 ## Fusion model
 
