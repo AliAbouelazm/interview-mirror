@@ -1,16 +1,27 @@
 """
-Train face emotion CNN from scratch on FER-2013 (HuggingFace).
+Train face emotion CNN from scratch on FER+ relabels of FER-2013.
 
-Architecture is a 4-block VGG-style network. Trained with Adam + cosine LR,
-strong augmentation, MixUp regulariser, and class-balanced cross-entropy.
+FER+ is the same 35k images as FER-2013 but with majority-vote labels from 10
+human annotators per image, which is meaningfully cleaner than the original
+single-annotator FER-2013 labels and is what most modern papers benchmark on.
+
+Architecture is the 4-block VGG-style CNN (~4.8M params). Training adds:
+  * MixUp (alpha 0.2) and CutMix (alpha 1.0), 50/50
+  * EMA weights (decay 0.999) used for the saved checkpoint
+  * Test-time augmentation (centre + horizontal flip, average) at eval
+  * Linear warmup for 5 epochs, then cosine annealing
+  * Strong augmentation: flip, affine, colour jitter, padded crop, random erase
+  * Class-balanced cross-entropy with label smoothing 0.05
 
 Usage:
     python -m app.models.face.train
 
-Saves best checkpoint to saved_models/face_best.pt and metrics JSON next to it.
+Saves best checkpoint to saved_models/face_best.pt.
 """
 import argparse
+import copy
 import json
+import math
 import time
 from pathlib import Path
 
@@ -19,7 +30,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
 from PIL import Image
 from sklearn.metrics import f1_score, accuracy_score, classification_report
@@ -38,41 +48,36 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-# FER-2013 emotion order from the most common HF mirror.
-FER_TO_OURS = {
-    0: "angry",
-    1: "disgusted",
-    2: "fearful",
-    3: "happy",
-    4: "sad",
-    5: "surprised",
-    6: "neutral",
+# FER+ label order from `deanngkl/ferplus-7cls`:
+#   anger, disgust, fear, happiness, neutral, sadness, surprise
+FERPLUS_NAMES = ["anger", "disgust", "fear", "happiness", "neutral", "sadness", "surprise"]
+FERPLUS_TO_OURS = {
+    "anger":     "angry",
+    "disgust":   "disgusted",
+    "fear":      "fearful",
+    "happiness": "happy",
+    "neutral":   "neutral",
+    "sadness":   "sad",
+    "surprise":  "surprised",
 }
 LABEL_TO_IDX = {name: i for i, name in enumerate(EMOTION_CLASSES)}
+FERPLUS_IDX_TO_OUR_IDX = {
+    i: LABEL_TO_IDX[FERPLUS_TO_OURS[name]] for i, name in enumerate(FERPLUS_NAMES)
+}
 
 
-def _row_image(row):
-    return row.get("image") or row.get("jpg") or row.get("img")
-
-
-def _row_label(row):
-    for key in ("label", "cls", "emotion"):
-        if key in row and row[key] is not None:
-            return int(row[key])
-    return None
-
-
-class FERDataset(Dataset):
+class FERPlusDataset(Dataset):
     def __init__(self, hf_split, transform):
         self.records = []
         for row in hf_split:
-            label_id = _row_label(row)
+            label_id = row.get("label")
             if label_id is None:
                 continue
-            our_name = FER_TO_OURS.get(label_id)
-            if our_name is None:
+            label_id = int(label_id)
+            mapped = FERPLUS_IDX_TO_OUR_IDX.get(label_id)
+            if mapped is None:
                 continue
-            self.records.append({"image": _row_image(row), "label": LABEL_TO_IDX[our_name]})
+            self.records.append({"image": row.get("image"), "label": mapped})
         self.transform = transform
 
     def __len__(self):
@@ -84,93 +89,112 @@ class FERDataset(Dataset):
         if not isinstance(img, Image.Image):
             img = Image.fromarray(np.array(img))
         img = img.convert("L")
-        img = self.transform(img)
-        return img, rec["label"]
+        return self.transform(img), rec["label"]
 
 
-def load_fer_splits():
-    """Load FER-2013 from HuggingFace. Falls back across candidate dataset names."""
-    candidates = [
-        "clip-benchmark/wds_fer2013",
-        "Jeneral/fer2013",
-        "CaptainHaaz/FER2013",
-    ]
-    last_err = None
-    for name in candidates:
-        try:
-            print(f"Trying dataset: {name}")
-            ds = load_dataset(name)
-            print(f"Loaded {name}")
-            return ds, name
-        except Exception as e:
-            last_err = e
-            print(f"  failed: {type(e).__name__}: {str(e)[:200]}")
-    raise RuntimeError(f"Could not load FER-2013 from any candidate: {last_err}")
+def load_ferplus():
+    name = "deanngkl/ferplus-7cls"
+    print(f"Loading {name}")
+    return load_dataset(name), name
 
 
-def _ensure_label_column(split):
-    """Cast cls/emotion column to label as a ClassLabel so train_test_split can stratify."""
-    cols = split.column_names
-    if "label" not in cols:
-        for source in ("cls", "emotion"):
-            if source in cols:
-                split = split.rename_column(source, "label")
-                break
-    feat = split.features.get("label")
-    if feat is not None and feat.__class__.__name__ != "ClassLabel":
-        split = split.class_encode_column("label")
-    return split
+def stratified_split(ds, train_frac: float, val_frac: float, seed: int = 42):
+    """Stratified train/val/test split by label."""
+    full = ds["train"] if "train" in ds else list(ds.values())[0]
+    labels = full["label"]
+    rng = np.random.default_rng(seed)
+    by_label: dict[int, list[int]] = {}
+    for i, l in enumerate(labels):
+        by_label.setdefault(int(l), []).append(i)
+    train_idx, val_idx, test_idx = [], [], []
+    for cls, idxs in by_label.items():
+        idxs = list(idxs)
+        rng.shuffle(idxs)
+        n = len(idxs)
+        n_train = int(round(train_frac * n))
+        n_val = int(round(val_frac * n))
+        train_idx.extend(idxs[:n_train])
+        val_idx.extend(idxs[n_train:n_train + n_val])
+        test_idx.extend(idxs[n_train + n_val:])
+    return full.select(train_idx), full.select(val_idx), full.select(test_idx)
 
 
-def split_dataset(ds_dict):
-    """Build train/val/test (70/15/15 stratified) from whatever splits the dataset provides."""
-    if "train" in ds_dict and ("test" in ds_dict or "validation" in ds_dict):
-        train = _ensure_label_column(ds_dict["train"])
-        if "validation" in ds_dict and "test" in ds_dict:
-            return train, _ensure_label_column(ds_dict["validation"]), _ensure_label_column(ds_dict["test"])
-        other = ds_dict.get("test") or ds_dict.get("validation")
-        other = _ensure_label_column(other)
-        split = other.train_test_split(test_size=0.5, seed=42, stratify_by_column="label")
-        return train, split["train"], split["test"]
-
-    full = ds_dict["train"] if "train" in ds_dict else list(ds_dict.values())[0]
-    full = _ensure_label_column(full)
-    a = full.train_test_split(test_size=0.30, seed=42, stratify_by_column="label")
-    b = a["test"].train_test_split(test_size=0.50, seed=42, stratify_by_column="label")
-    return a["train"], b["train"], b["test"]
-
-
-def _mixup(x: torch.Tensor, y: torch.Tensor, alpha: float = 0.2):
-    """Standard MixUp. Returns mixed x, two label tensors, and the lambda weight."""
-    if alpha <= 0:
-        return x, y, y, 1.0
-    lam = np.random.beta(alpha, alpha)
+def _mixup_batch(x: torch.Tensor, y: torch.Tensor, alpha: float):
+    lam = float(np.random.beta(alpha, alpha))
     lam = max(lam, 1 - lam)
     perm = torch.randperm(x.size(0), device=x.device)
-    x_mix = lam * x + (1 - lam) * x[perm]
+    return lam * x + (1 - lam) * x[perm], y, y[perm], lam
+
+
+def _cutmix_batch(x: torch.Tensor, y: torch.Tensor, alpha: float):
+    lam = float(np.random.beta(alpha, alpha))
+    perm = torch.randperm(x.size(0), device=x.device)
+    h, w = x.size(2), x.size(3)
+    cut_ratio = math.sqrt(1 - lam)
+    cut_h = int(h * cut_ratio)
+    cut_w = int(w * cut_ratio)
+    cy = np.random.randint(h)
+    cx = np.random.randint(w)
+    y1 = max(cy - cut_h // 2, 0)
+    y2 = min(cy + cut_h // 2, h)
+    x1 = max(cx - cut_w // 2, 0)
+    x2 = min(cx + cut_w // 2, w)
+    x_mix = x.clone()
+    x_mix[:, :, y1:y2, x1:x2] = x[perm][:, :, y1:y2, x1:x2]
+    lam = 1 - ((y2 - y1) * (x2 - x1) / (h * w))
     return x_mix, y, y[perm], float(lam)
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, mixup_alpha: float = 0.2):
+def warmup_cosine_lr(epoch: int, base_lr: float, total_epochs: int, warmup_epochs: int) -> float:
+    if epoch < warmup_epochs:
+        return base_lr * (epoch + 1) / max(warmup_epochs, 1)
+    progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
+    return 0.5 * base_lr * (1 + math.cos(math.pi * progress))
+
+
+class EMA:
+    """Exponential moving average of model parameters."""
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    def update(self, model: nn.Module):
+        for k, v in model.state_dict().items():
+            if v.dtype.is_floating_point:
+                self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1 - self.decay)
+            else:
+                self.shadow[k].copy_(v)
+
+    def apply_to(self, model: nn.Module):
+        out = copy.deepcopy(model)
+        out.load_state_dict(self.shadow, strict=True)
+        return out
+
+
+def train_one_epoch(model, loader, criterion, optimizer, device, ema, mixup_alpha, cutmix_alpha):
     model.train()
     total_loss = 0.0
     n = 0
     for images, labels in tqdm(loader, desc="train", leave=False):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
-        x, ya, yb, lam = _mixup(images, labels, alpha=mixup_alpha)
+        if np.random.rand() < 0.5:
+            x, ya, yb, lam = _mixup_batch(images, labels, mixup_alpha)
+        else:
+            x, ya, yb, lam = _cutmix_batch(images, labels, cutmix_alpha)
         optimizer.zero_grad()
         logits = model(x)
         loss = lam * criterion(logits, ya) + (1 - lam) * criterion(logits, yb)
         loss.backward()
         optimizer.step()
+        ema.update(model)
         total_loss += loss.item() * images.size(0)
         n += images.size(0)
     return total_loss / max(n, 1)
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device, tta: bool = False):
     model.eval()
     total_loss = 0.0
     n = 0
@@ -179,6 +203,9 @@ def evaluate(model, loader, criterion, device):
         images = images.to(device, non_blocking=True)
         labels_dev = labels.to(device, non_blocking=True)
         logits = model(images)
+        if tta:
+            logits = logits + model(torch.flip(images, dims=(3,)))
+            logits = logits / 2
         loss = criterion(logits, labels_dev)
         total_loss += loss.item() * images.size(0)
         n += images.size(0)
@@ -196,32 +223,34 @@ def evaluate(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--epochs", type=int, default=120)
+    parser.add_argument("--warmup-epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
-    parser.add_argument("--patience", type=int, default=12)
+    parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--mixup-alpha", type=float, default=0.2)
+    parser.add_argument("--cutmix-alpha", type=float, default=1.0)
+    parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--out", type=str, default="saved_models/face_best.pt")
     args = parser.parse_args()
 
     device = get_device()
     print(f"Device: {device}")
 
-    ds_dict, ds_name = load_fer_splits()
-    train_raw, val_raw, test_raw = split_dataset(ds_dict)
+    ds_dict, ds_name = load_ferplus()
+    train_raw, val_raw, test_raw = stratified_split(ds_dict, 0.70, 0.15)
 
-    # Stronger augmentation: random crops, flips, affine, contrast jitter, random erasing.
     train_tf = transforms.Compose([
         transforms.Resize((48, 48)),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.95, 1.05)),
-        transforms.ColorJitter(brightness=0.25, contrast=0.25),
+        transforms.RandomAffine(degrees=12, translate=(0.06, 0.06), scale=(0.92, 1.08)),
+        transforms.ColorJitter(brightness=0.3, contrast=0.3),
         transforms.RandomCrop(48, padding=4, padding_mode="reflect"),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5], std=[0.5]),
-        transforms.RandomErasing(p=0.25, scale=(0.02, 0.15)),
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.18)),
     ])
     eval_tf = transforms.Compose([
         transforms.Resize((48, 48)),
@@ -229,9 +258,9 @@ def main():
         transforms.Normalize(mean=[0.5], std=[0.5]),
     ])
 
-    train_set = FERDataset(train_raw, train_tf)
-    val_set = FERDataset(val_raw, eval_tf)
-    test_set = FERDataset(test_raw, eval_tf)
+    train_set = FERPlusDataset(train_raw, train_tf)
+    val_set = FERPlusDataset(val_raw, eval_tf)
+    test_set = FERPlusDataset(test_raw, eval_tf)
     print(f"Splits: train={len(train_set)} val={len(val_set)} test={len(test_set)}")
 
     counts = np.bincount([r["label"] for r in train_set.records], minlength=len(EMOTION_CLASSES))
@@ -249,13 +278,13 @@ def main():
 
     model = FaceEmotionCNN(num_classes=len(EMOTION_CLASSES)).to(device)
     print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
+    ema = EMA(model, decay=args.ema_decay)
 
     train_labels = [r["label"] for r in train_set.records]
     cw = compute_class_weight("balanced", classes=np.arange(len(EMOTION_CLASSES)), y=train_labels)
     weight_tensor = torch.tensor(cw, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.05)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -267,20 +296,23 @@ def main():
     history = []
 
     for epoch in range(1, args.epochs + 1):
+        lr = warmup_cosine_lr(epoch - 1, args.lr, args.epochs, args.warmup_epochs)
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr
+
         t0 = time.time()
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device,
-                                     mixup_alpha=args.mixup_alpha)
-        val = evaluate(model, val_loader, criterion, device)
-        scheduler.step()
+                                     ema, args.mixup_alpha, args.cutmix_alpha)
+        ema_model = ema.apply_to(model)
+        val = evaluate(ema_model, val_loader, criterion, device, tta=False)
         epoch_time = time.time() - t0
         print(
-            f"Epoch {epoch:02d}/{args.epochs} "
-            f"train_loss={train_loss:.4f} "
-            f"val_loss={val['loss']:.4f} val_f1={val['f1_macro']:.4f} "
-            f"val_acc={val['accuracy']:.4f} time={epoch_time:.1f}s"
+            f"Epoch {epoch:03d}/{args.epochs} lr={lr:.2e} "
+            f"train_loss={train_loss:.4f} val_loss={val['loss']:.4f} "
+            f"val_f1={val['f1_macro']:.4f} val_acc={val['accuracy']:.4f} time={epoch_time:.1f}s"
         )
         history.append({
-            "epoch": epoch, "train_loss": train_loss,
+            "epoch": epoch, "lr": lr, "train_loss": train_loss,
             "val_loss": val["loss"], "val_f1": val["f1_macro"], "val_acc": val["accuracy"],
         })
 
@@ -289,7 +321,7 @@ def main():
             best_epoch = epoch
             epochs_since_improve = 0
             torch.save({
-                "model_state": model.state_dict(),
+                "model_state": ema_model.state_dict(),
                 "classes": EMOTION_CLASSES,
                 "val_f1": best_f1,
                 "epoch": epoch,
@@ -302,11 +334,12 @@ def main():
                 break
 
     state = torch.load(out_path, map_location=device, weights_only=False)
-    model.load_state_dict(state["model_state"])
-    test = evaluate(model, test_loader, criterion, device)
+    eval_model = FaceEmotionCNN(num_classes=len(EMOTION_CLASSES)).to(device)
+    eval_model.load_state_dict(state["model_state"])
+    test = evaluate(eval_model, test_loader, criterion, device, tta=True)
     report = classification_report(test["labels"], test["preds"], target_names=EMOTION_CLASSES,
                                    zero_division=0, output_dict=True)
-    print("\nTest results:")
+    print("\nTest results (TTA enabled):")
     print(f"  f1_macro: {test['f1_macro']:.4f}")
     print(f"  accuracy: {test['accuracy']:.4f}")
     print(classification_report(test["labels"], test["preds"], target_names=EMOTION_CLASSES, zero_division=0))
@@ -320,7 +353,9 @@ def main():
         "test_per_class": report,
         "history": history,
         "classes": EMOTION_CLASSES,
-        "params": int(sum(p.numel() for p in model.parameters())),
+        "params": int(sum(p.numel() for p in eval_model.parameters())),
+        "tta": True,
+        "ema_decay": args.ema_decay,
     }
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)

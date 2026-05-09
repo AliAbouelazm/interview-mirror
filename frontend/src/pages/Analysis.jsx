@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  AreaChart, Area, BarChart, Bar, CartesianGrid, ResponsiveContainer,
-  Tooltip, XAxis, YAxis,
+  AreaChart, Area, BarChart, Bar, CartesianGrid, LineChart, Line,
+  ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { getAnalysis, getTimeline } from '../api/client'
 import { SkeletonCard, SkeletonChart } from '../components/Skeleton'
@@ -54,6 +54,18 @@ export default function Analysis() {
     return analysis.filler.chart_data.map((c) => ({ name: c.label, count: c.count }))
   }, [analysis])
 
+  const faceDynamicsChart = useMemo(() => {
+    const ticks = analysis?.face_dynamics?.ticks
+    if (!ticks?.length) return []
+    const base = ticks[0].timestamp
+    return ticks.map((t) => ({
+      t: Math.round((t.timestamp - base) * 10) / 10,
+      eye: Math.round(t.eye_openness * 100),
+      smile: Math.round(t.smile * 100),
+      looking: Math.round(t.looking_at_camera * 100),
+    }))
+  }, [analysis])
+
   if (error) {
     return (
       <div className={styles.page}>
@@ -71,8 +83,8 @@ export default function Analysis() {
       <div className={styles.page}>
         <Link to="/" className={styles.backLink}>← Back</Link>
         <div className={styles.scoreRow}>
-          <SkeletonCard height={120} />
-          <SkeletonCard height={120} />
+          <SkeletonCard height={140} />
+          <SkeletonCard height={140} />
         </div>
         <SkeletonChart height={280} />
         <SkeletonChart height={200} />
@@ -81,43 +93,55 @@ export default function Analysis() {
   }
 
   const overall = analysis.overall
+  const fd = analysis.face_dynamics || {}
+  const perQ = analysis.per_question || []
+
   return (
     <div className={styles.page}>
-      <Link to="/" className={styles.backLink}>← Back</Link>
+      <Link to="/" className={styles.backLink}>&larr; Back</Link>
 
       <div>
         <h1 className={styles.heading}>Session analysis</h1>
         <div className={styles.headingMeta}>
-          {fmtTime(analysis.duration_seconds)} duration · {analysis.frame_count} frames analysed
+          {fmtTime(analysis.duration_seconds)} duration &middot; {analysis.frame_count} frames analysed
+          {fd.available ? ` · ${fd.tick_count} face ticks` : ''}
         </div>
       </div>
 
       <div className={styles.scoreRow}>
         <div className={styles.scoreCard}>
-          <div className={styles.scoreCardLeft}>
-            <div className={styles.scoreLabel}>Confidence</div>
-            <div className={styles.scoreValue}>{Math.round(overall.avg_confidence)}</div>
-            <div className={styles.scoreTrend}>
-              <span aria-hidden="true">{TREND_GLYPH[overall.trend] || '→'}</span>
-              {overall.trend} ({overall.trend_slope >= 0 ? '+' : ''}{overall.trend_slope})
-            </div>
+          <div className={styles.scoreLabel}>Confidence</div>
+          <div className={styles.scoreValue}>{Math.round(overall.avg_confidence)}</div>
+          <div className={styles.scoreTrend}>
+            <span aria-hidden="true">{TREND_GLYPH[overall.trend] || '→'}</span>
+            {overall.trend} ({overall.trend_slope >= 0 ? '+' : ''}{overall.trend_slope})
           </div>
         </div>
         <div className={styles.scoreCard}>
-          <div className={styles.scoreCardLeft}>
-            <div className={styles.scoreLabel}>Engagement</div>
-            <div className={styles.scoreValue}>{Math.round(overall.avg_engagement)}</div>
-            <div className={styles.scoreTrend}>
-              {analysis.face.dominant} face most often
-            </div>
-          </div>
+          <div className={styles.scoreLabel}>Engagement</div>
+          <div className={styles.scoreValue}>{Math.round(overall.avg_engagement)}</div>
+          <div className={styles.scoreTrend}>{analysis.face.dominant} most often</div>
         </div>
+        {fd.available && (
+          <>
+            <div className={styles.scoreCard}>
+              <div className={styles.scoreLabel}>Eye contact</div>
+              <div className={styles.scoreValue}>{Math.round(fd.looking_pct)}</div>
+              <div className={styles.scoreTrend}>% facing camera</div>
+            </div>
+            <div className={styles.scoreCard}>
+              <div className={styles.scoreLabel}>Smile</div>
+              <div className={styles.scoreValue}>{Math.round((fd.avg_smile || 0) * 100)}</div>
+              <div className={styles.scoreTrend}>average intensity</div>
+            </div>
+          </>
+        )}
       </div>
 
       <div className={styles.section}>
-        <div className={styles.sectionTitle}>Confidence and engagement over time</div>
+        <span className={styles.sectionTitle}>Confidence and engagement over time</span>
         <div className={styles.chartCard}>
-          <div style={{ width: '100%', height: 280 }}>
+          <div style={{ width: '100%', height: 260 }}>
             <ResponsiveContainer>
               <AreaChart data={chartData} margin={{ top: 10, right: 10, bottom: 8, left: 0 }}>
                 <defs>
@@ -137,7 +161,7 @@ export default function Analysis() {
                 <Tooltip
                   contentStyle={{
                     background: 'var(--surface-raised)', border: '1px solid var(--border)',
-                    borderRadius: 6, fontSize: 12, color: 'var(--text-primary)',
+                    fontSize: 12, color: 'var(--text-primary)',
                   }}
                   labelFormatter={(v) => `At ${fmtTime(v)}`}
                 />
@@ -150,6 +174,30 @@ export default function Analysis() {
           </div>
         </div>
       </div>
+
+      {perQ.length > 0 && (
+        <div className={styles.section}>
+          <span className={styles.sectionTitle}>Per-question breakdown</span>
+          <div className={styles.qaList}>
+            {perQ.map((q, i) => (
+              <div key={i} className={styles.qaItem}>
+                <div>
+                  <div className={styles.qaCategory}>
+                    {q.category} &middot; {q.difficulty} &middot; {q.answered_seconds}s spoken
+                    {q.target_seconds ? ` of ${q.target_seconds}s target` : ''}
+                  </div>
+                  <div className={styles.qaQuestion}>{q.text}</div>
+                  <div className={styles.qaCategory} style={{ marginTop: 4 }}>
+                    {q.word_count} words &middot; {q.filler_count} fillers
+                  </div>
+                </div>
+                <div className={styles.qaCategory}>confidence</div>
+                <div className={styles.qaScore}>{Math.round(q.avg_confidence)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className={styles.momentsRow}>
         <div className={styles.momentColumn}>
@@ -172,8 +220,58 @@ export default function Analysis() {
         </div>
       </div>
 
+      {fd.available && faceDynamicsChart.length > 0 && (
+        <div className={styles.section}>
+          <span className={styles.sectionTitle}>Face dynamics over time</span>
+          <div className={styles.faceBreakdown}>
+            <div className={styles.faceBreakdownItem}>
+              <div className={styles.faceBreakdownPct}>{Math.round(fd.looking_pct)}%</div>
+              <div className={styles.faceBreakdownLabel}>Camera-facing</div>
+            </div>
+            <div className={styles.faceBreakdownItem}>
+              <div className={styles.faceBreakdownPct}>{Math.round((fd.avg_eye_openness || 0) * 100)}%</div>
+              <div className={styles.faceBreakdownLabel}>Eye openness</div>
+            </div>
+            <div className={styles.faceBreakdownItem}>
+              <div className={styles.faceBreakdownPct}>{Math.round((fd.avg_smile || 0) * 100)}%</div>
+              <div className={styles.faceBreakdownLabel}>Smile</div>
+            </div>
+            <div className={styles.faceBreakdownItem}>
+              <div className={styles.faceBreakdownPct}>{(fd.head_yaw_std || 0).toFixed(2)}</div>
+              <div className={styles.faceBreakdownLabel}>Yaw σ (rad)</div>
+            </div>
+            <div className={styles.faceBreakdownItem}>
+              <div className={styles.faceBreakdownPct}>{(fd.head_pitch_std || 0).toFixed(2)}</div>
+              <div className={styles.faceBreakdownLabel}>Pitch σ (rad)</div>
+            </div>
+          </div>
+          <div className={styles.chartCard}>
+            <div style={{ width: '100%', height: 220 }}>
+              <ResponsiveContainer>
+                <LineChart data={faceDynamicsChart} margin={{ top: 10, right: 10, bottom: 8, left: 0 }}>
+                  <CartesianGrid stroke="var(--border-subtle)" />
+                  <XAxis dataKey="t" stroke="var(--text-tertiary)" fontSize={11}
+                         tickFormatter={(v) => fmtTime(v)} />
+                  <YAxis domain={[0, 100]} stroke="var(--text-tertiary)" fontSize={11} />
+                  <Tooltip
+                    contentStyle={{
+                      background: 'var(--surface-raised)', border: '1px solid var(--border)',
+                      fontSize: 12, color: 'var(--text-primary)',
+                    }}
+                    labelFormatter={(v) => `At ${fmtTime(v)}`}
+                  />
+                  <Line type="monotone" dataKey="eye" stroke="var(--engagement)" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="smile" stroke="var(--filler)" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="looking" stroke="var(--confidence-high)" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className={styles.section}>
-        <div className={styles.sectionTitle}>Filler usage</div>
+        <span className={styles.sectionTitle}>Filler usage</span>
         <div className={styles.fillerStats}>
           <span><span className={styles.fillerStatNum}>{analysis.filler.total_count}</span> total</span>
           <span><span className={styles.fillerStatNum}>{analysis.filler.rate_per_minute}</span> per minute</span>
@@ -192,10 +290,10 @@ export default function Analysis() {
                     cursor={{ fill: 'var(--border-subtle)' }}
                     contentStyle={{
                       background: 'var(--surface-raised)', border: '1px solid var(--border)',
-                      borderRadius: 6, fontSize: 12,
+                      fontSize: 12,
                     }}
                   />
-                  <Bar dataKey="count" fill="var(--filler)" radius={[0, 3, 3, 0]} />
+                  <Bar dataKey="count" fill="var(--filler)" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -204,10 +302,12 @@ export default function Analysis() {
       </div>
 
       <div className={styles.section}>
-        <div className={styles.sectionTitle}>Insights</div>
+        <span className={styles.sectionTitle}>Insights</span>
         <div className={styles.insightsRow}>
           {analysis.insights.map((insight, i) => (
-            <InsightCard key={i} insight={insight} />
+            <div key={i} className={styles.insightCardWrap}>
+              <InsightCard insight={insight} />
+            </div>
           ))}
         </div>
       </div>

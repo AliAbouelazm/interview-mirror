@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import FaceMeshOverlay from './FaceMeshOverlay'
 import styles from '../styles/components.module.css'
 
 const RING_COLORS = {
@@ -17,14 +18,20 @@ const STATUS_DOT = {
 }
 
 const STATUS_LABEL = {
-  connected: 'Connected',
+  connected: 'Live',
   connecting: 'Connecting',
   disconnected: 'Reconnecting',
-  error: 'Connection lost',
+  error: 'Lost',
   idle: 'Idle',
 }
 
-export default function LiveFeed({ stream, faceSignal = 'engaged', wsStatus = 'idle' }) {
+export default function LiveFeed({
+  stream,
+  faceSignal = 'engaged',
+  wsStatus = 'idle',
+  landmarks = null,
+  onVideoReady,
+}) {
   const videoRef = useRef(null)
 
   useEffect(() => {
@@ -33,17 +40,21 @@ export default function LiveFeed({ stream, faceSignal = 'engaged', wsStatus = 'i
     if (stream) {
       v.srcObject = stream
       v.play().catch(() => {})
+      onVideoReady && onVideoReady(v)
     } else {
       v.srcObject = null
     }
-  }, [stream])
+  }, [stream, onVideoReady])
 
   const ringColor = RING_COLORS[faceSignal] || 'var(--border)'
 
   return (
     <div className={styles.liveFeedContainer}>
-      <div className={styles.liveFeedWrap} style={{ boxShadow: `0 0 0 2px ${ringColor}, var(--shadow-1)` }}>
+      <div className={styles.liveFeedWrap} style={{ borderColor: ringColor }}>
         <video ref={videoRef} muted playsInline className={styles.liveFeedVideo} />
+        <div className={styles.liveFeedOverlay}>
+          <FaceMeshOverlay landmarks={landmarks} />
+        </div>
         {!stream && <div className={styles.liveFeedPlaceholder}>Waiting for camera</div>}
       </div>
       <div className={styles.connectionRow}>

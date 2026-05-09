@@ -1,19 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import LiveFeed from '../components/LiveFeed'
 import VoiceWave from '../components/VoiceWave'
 import ConfidenceGauge from '../components/ConfidenceGauge'
 import SignalTimeline from '../components/SignalTimeline'
 import FillerCounter from '../components/FillerCounter'
+import QuestionPanel from '../components/QuestionPanel'
 import { useMediaDevices } from '../hooks/useMediaDevices'
 import { useSession } from '../hooks/useSession'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useFaceMesh } from '../hooks/useFaceMesh'
+import { recordFaceTicks, recordQuestionEvent } from '../api/client'
 import styles from '../styles/session.module.css'
 
 const FRAME_INTERVAL_MS = 500
 const FRAME_TARGET_W = 320
 const FRAME_TARGET_H = 240
 const JPEG_QUALITY = 0.7
+const TICK_FLUSH_MS = 5000
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer)
@@ -26,7 +30,7 @@ function arrayBufferToBase64(buffer) {
 }
 
 function HighlightedTranscript({ text, flagged }) {
-  if (!text) return <span className={styles.transcriptEmpty}>Transcript will appear as you speak...</span>
+  if (!text) return <span className={styles.transcriptEmpty}>Transcript will appear as you speak.</span>
   if (!flagged || flagged.length === 0) return text
   const lower = text.toLowerCase()
   const parts = []
@@ -61,17 +65,25 @@ function HighlightedTranscript({ text, flagged }) {
 
 export default function Session() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const questions = location.state?.questions || []
+
   const { stream, status: mediaStatus, request, stop, error: mediaError } = useMediaDevices()
   const { sessionId, status: sessionStatus, error: sessionError, start, finish } = useSession()
   const [latest, setLatest] = useState(null)
   const [history, setHistory] = useState([])
   const [elapsedMs, setElapsedMs] = useState(0)
+  const [questionIdx, setQuestionIdx] = useState(0)
+  const [questionStartedAt, setQuestionStartedAt] = useState(null)
   const startTsRef = useRef(null)
   const frameCanvasRef = useRef(null)
-  const frameLoopRef = useRef(null)
   const audioCtxRef = useRef(null)
   const audioNodeRef = useRef(null)
   const sourceNodeRef = useRef(null)
+
+  const [videoEl, setVideoEl] = useState(null)
+  const [latestLandmarks, setLatestLandmarks] = useState(null)
+  const tickBufferRef = useRef([])
 
   useEffect(() => {
     if (!stream && mediaStatus === 'idle') {
@@ -97,6 +109,20 @@ export default function Session() {
     return () => clearInterval(id)
   }, [sessionStatus])
 
+  // Record question events when index advances
+  useEffect(() => {
+    if (sessionStatus !== 'active' || !sessionId || questions.length === 0) return
+    const q = questions[questionIdx]
+    if (!q) return
+    const startedAt = Date.now()
+    setQuestionStartedAt(startedAt)
+    recordQuestionEvent(sessionId, {
+      question_id: q.id,
+      started_at: startedAt / 1000,
+      ended_at: null,
+    }).catch(() => {})
+  }, [sessionId, sessionStatus, questionIdx, questions])
+
   const handleMessage = useCallback((data) => {
     if (data.type !== 'realtime') return
     setLatest(data)
@@ -112,14 +138,37 @@ export default function Session() {
     onMessage: handleMessage,
   })
 
+  // FaceMesh on the live video element
+  const handleFaceTick = useCallback((m) => {
+    setLatestLandmarks(m.landmarks)
+    tickBufferRef.current.push({
+      timestamp: Date.now() / 1000,
+      head_yaw: m.head_yaw,
+      head_pitch: m.head_pitch,
+      head_roll: m.head_roll,
+      eye_openness: m.eye_openness,
+      smile: m.smile,
+      looking_at_camera: m.looking_at_camera,
+    })
+  }, [])
+
+  useFaceMesh({ video: videoEl, enabled: !!videoEl && sessionStatus === 'active', onTick: handleFaceTick })
+
+  // Periodically flush face ticks to the server
+  useEffect(() => {
+    if (!sessionId || sessionStatus !== 'active') return undefined
+    const id = setInterval(() => {
+      if (tickBufferRef.current.length === 0) return
+      const ticks = tickBufferRef.current.splice(0, tickBufferRef.current.length)
+      recordFaceTicks(sessionId, ticks).catch(() => {})
+    }, TICK_FLUSH_MS)
+    return () => clearInterval(id)
+  }, [sessionId, sessionStatus])
+
   // Send video frames at FRAME_INTERVAL_MS
   useEffect(() => {
     if (!stream || !sessionId || wsStatus !== 'connected') return undefined
-    const video = document.createElement('video')
-    video.muted = true
-    video.playsInline = true
-    video.srcObject = stream
-    video.play().catch(() => {})
+    if (!videoEl) return undefined
     if (!frameCanvasRef.current) {
       frameCanvasRef.current = document.createElement('canvas')
       frameCanvasRef.current.width = FRAME_TARGET_W
@@ -130,26 +179,21 @@ export default function Session() {
 
     const tick = () => {
       try {
-        if (video.videoWidth > 0) {
-          ctx.drawImage(video, 0, 0, FRAME_TARGET_W, FRAME_TARGET_H)
+        if (videoEl.videoWidth > 0) {
+          ctx.drawImage(videoEl, 0, 0, FRAME_TARGET_W, FRAME_TARGET_H)
           const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY)
           send({ type: 'video', frame: dataUrl })
         }
       } catch {}
     }
     const id = setInterval(tick, FRAME_INTERVAL_MS)
-    frameLoopRef.current = id
-    return () => {
-      clearInterval(id)
-      try { video.srcObject = null } catch {}
-    }
-  }, [stream, sessionId, wsStatus, send])
+    return () => clearInterval(id)
+  }, [stream, sessionId, wsStatus, videoEl, send])
 
   // Stream PCM via AudioWorklet
   useEffect(() => {
     if (!stream || !sessionId || wsStatus !== 'connected') return undefined
     let cancelled = false
-
     const setup = async () => {
       try {
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 })
@@ -173,12 +217,9 @@ export default function Session() {
         audioCtxRef.current = audioCtx
         audioNodeRef.current = node
         sourceNodeRef.current = source
-      } catch {
-        // Mic processing failed; nothing to do here, transcription will be silent.
-      }
+      } catch {}
     }
     setup()
-
     return () => {
       cancelled = true
       try { audioNodeRef.current?.disconnect() } catch {}
@@ -199,10 +240,39 @@ export default function Session() {
 
   const handleEnd = async () => {
     try {
+      // Mark current question ended
+      if (sessionId && questions[questionIdx]) {
+        recordQuestionEvent(sessionId, {
+          question_id: questions[questionIdx].id,
+          started_at: (questionStartedAt || Date.now()) / 1000,
+          ended_at: Date.now() / 1000,
+        }).catch(() => {})
+      }
+      // Flush remaining ticks
+      if (sessionId && tickBufferRef.current.length > 0) {
+        const ticks = tickBufferRef.current.splice(0, tickBufferRef.current.length)
+        await recordFaceTicks(sessionId, ticks).catch(() => {})
+      }
       stop()
       const r = await finish()
       if (r) navigate(`/analysis/${r.session_id}`)
     } catch {}
+  }
+
+  const handleQuestionAdvance = async (nextIdx) => {
+    if (!sessionId) return
+    const cur = questions[questionIdx]
+    const start = questionStartedAt || Date.now()
+    if (cur) {
+      try {
+        await recordQuestionEvent(sessionId, {
+          question_id: cur.id,
+          started_at: start / 1000,
+          ended_at: Date.now() / 1000,
+        })
+      } catch {}
+    }
+    setQuestionIdx(nextIdx)
   }
 
   const ending = sessionStatus === 'ending'
@@ -222,39 +292,75 @@ export default function Session() {
   return (
     <div className={styles.page}>
       <div className={styles.column}>
-        <LiveFeed stream={stream} faceSignal={faceSignal} wsStatus={wsStatus} />
+        <LiveFeed
+          stream={stream}
+          faceSignal={faceSignal}
+          wsStatus={wsStatus}
+          landmarks={latestLandmarks}
+          onVideoReady={setVideoEl}
+        />
         <VoiceWave stream={stream} voiceSignal={voiceSignal} />
+        <QuestionPanel
+          questions={questions}
+          index={questionIdx}
+          startedAt={questionStartedAt}
+          onPrev={() => handleQuestionAdvance(Math.max(0, questionIdx - 1))}
+          onNext={() => handleQuestionAdvance(Math.min(questions.length - 1, questionIdx + 1))}
+          onSkip={() => handleQuestionAdvance(Math.min(questions.length - 1, questionIdx + 1))}
+        />
         {error && <div className={styles.errorBanner}>{error}</div>}
       </div>
 
       <div className={styles.centerColumn}>
-        <ConfidenceGauge score={confidence} label="Confidence" />
-        <div className={styles.engagementWrap}>
-          <div className={styles.engagementHeader}>
-            <span>Engagement</span>
-            <span>{Math.round(engagement)}</span>
-          </div>
-          <div className={styles.engagementBar}>
-            <div className={styles.engagementFill} style={{ width: `${Math.max(2, engagement)}%` }} />
+        <div className={styles.gaugeBlock}>
+          <ConfidenceGauge score={confidence} label="Confidence" />
+          <div className={styles.engagementWrap}>
+            <div className={styles.engagementHeader}>
+              <span>Engagement</span>
+              <span className="tabular">{Math.round(engagement)}</span>
+            </div>
+            <div className={styles.engagementBar}>
+              <div className={styles.engagementFill} style={{ width: `${Math.max(2, engagement)}%` }} />
+            </div>
           </div>
         </div>
-        <div className={styles.signalRow}>
-          <span className={`${styles.pill} ${styles.pillActive}`}>Face: {faceSignal}</span>
-          <span className={`${styles.pill} ${styles.pillActive}`}>Voice: {voiceSignal}</span>
-          <span className={`${styles.pill} ${styles.pillActive}`}>Driver: {driver}</span>
+
+        <div className={styles.signalGrid}>
+          <div className={styles.signalCell}>
+            <span className={styles.signalCellLabel}>Face</span>
+            <span className={styles.signalCellValue}>{faceSignal}</span>
+          </div>
+          <div className={styles.signalCell}>
+            <span className={styles.signalCellLabel}>Voice</span>
+            <span className={styles.signalCellValue}>{voiceSignal}</span>
+          </div>
+          <div className={styles.signalCell}>
+            <span className={styles.signalCellLabel}>Driver</span>
+            <span className={styles.signalCellValue}>{driver}</span>
+          </div>
+          <div className={styles.signalCell}>
+            <span className={styles.signalCellLabel}>Cycle</span>
+            <span className={styles.signalCellValue}>{Math.round(cycleMs)}ms</span>
+          </div>
         </div>
+
         <FillerCounter count={fillerCount} latestPhrase={latestPhrase} />
+
         <div className={styles.transcriptCard}>
+          <div className={styles.transcriptHeader}>Transcript</div>
           <HighlightedTranscript text={transcript} flagged={flagged} />
         </div>
       </div>
 
       <div className={styles.column}>
         <SignalTimeline history={history} />
-        <div className={styles.timer}>{elapsedLabel}</div>
+        <div className={styles.timerBlock}>
+          <div className={styles.timerLabel}>Elapsed</div>
+          <div className={styles.timer}>{elapsedLabel}</div>
+        </div>
         <div className={styles.cycleIndicator}>
           <span>Cycle {Math.round(cycleMs)}ms</span>
-          <span>Last frame {Math.round(totalLatency)}ms</span>
+          <span>Frame {Math.round(totalLatency)}ms</span>
         </div>
         <button
           type="button"
@@ -263,7 +369,7 @@ export default function Session() {
           disabled={ending || !sessionId}
         >
           {ending && <span className={styles.endButtonSpinner} />}
-          {ending ? 'Ending...' : 'End Session'}
+          {ending ? 'Ending...' : 'End session'}
         </button>
       </div>
     </div>

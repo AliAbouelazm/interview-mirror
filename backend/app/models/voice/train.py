@@ -1,12 +1,22 @@
 """
-Train voice emotion CNN from scratch on a combined RAVDESS + CREMA-D corpus.
+Train voice emotion CNN from scratch on RAVDESS + CREMA-D + SAVEE combined.
 
-RAVDESS provides 1,440 clips across 8 emotions (8 actors, 4 statements each).
-CREMA-D provides 7,442 clips across 6 emotions (no calm or surprised). Combining
-the two gives roughly 9k samples while still covering all 8 of our target classes.
+Datasets:
+  * RAVDESS (1,440) covers all 8 of our target classes including the rarer
+    "calm" and "surprised".
+  * CREMA-D (7,442) covers 6 emotions (no calm or surprised) and supplies the
+    bulk of the training signal for those 6 classes.
+  * SAVEE (480) covers 7 emotions (no calm) and contributes additional
+    "surprised" examples.
+  * Total: 9,362 clips covering all 8 classes.
 
-Augmentation includes gaussian noise, time-shift, and SpecAugment-style time +
-frequency masking.
+Training adds:
+  * Pre-computed mel + stat features (CPU bound once, then GPU only).
+  * SpecAugment (frequency + time masks) on the mel cache each epoch.
+  * Mel-level MixUp (alpha 0.2) on every batch.
+  * EMA weights (decay 0.999) used for the saved checkpoint.
+  * Linear warmup for 5 epochs, then cosine annealing.
+  * Class-balanced cross-entropy with label smoothing 0.05.
 
 Usage:
     python -m app.models.voice.train
@@ -14,7 +24,9 @@ Usage:
 Saves best checkpoint to saved_models/voice_best.pt.
 """
 import argparse
+import copy
 import json
+import math
 import time
 from pathlib import Path
 
@@ -22,7 +34,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.metrics import f1_score, accuracy_score, classification_report
 from sklearn.utils.class_weight import compute_class_weight
 from datasets import load_dataset, Audio
@@ -45,7 +56,6 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-# RAVDESS file naming and HF mirrors use this canonical 8-emotion label order.
 RAVDESS_TO_OURS = {
     1: "neutral", 2: "calm", 3: "happy", 4: "sad",
     5: "angry", 6: "fearful", 7: "disgusted", 8: "surprised",
@@ -89,76 +99,60 @@ def parse_ravdess_label(row) -> int | None:
 
 
 def parse_cremad_label(row) -> int | None:
-    """CREMA-D's `major_emotion` strings: anger, sadness, disgust, fear, neutral, happy."""
-    name = row.get("major_emotion")
-    if not name:
-        return None
-    return _resolve_string_label(name)
+    return _resolve_string_label(row.get("major_emotion") or "")
 
 
-def load_ravdess() -> list[dict]:
-    candidates = ["xbgoose/ravdess", "narad/ravdess", "Codec-SUPERB/RAVDESS"]
-    last_err = None
-    for name in candidates:
+def parse_savee_label(row) -> int | None:
+    return _resolve_string_label(row.get("emotion") or "")
+
+
+def _load_one(name: str, source: str, parse_fn) -> list[dict]:
+    print(f"  trying {source}: {name}")
+    ds = load_dataset(name)
+    split = ds["train"] if "train" in ds else list(ds.values())[0]
+    split = split.cast_column("audio", Audio(sampling_rate=SAMPLE_RATE))
+    out = []
+    for row in split:
+        label = parse_fn(row)
+        if label is None:
+            continue
+        out.append({
+            "audio": np.asarray(row["audio"]["array"], dtype=np.float32),
+            "label": label,
+            "source": source,
+        })
+    print(f"  {source} loaded ({len(out)} samples)")
+    return out
+
+
+def load_corpora() -> list[dict]:
+    out: list[dict] = []
+    for name in ["xbgoose/ravdess", "narad/ravdess"]:
         try:
-            print(f"  trying RAVDESS: {name}")
-            ds = load_dataset(name)
-            split = ds["train"] if "train" in ds else list(ds.values())[0]
-            split = split.cast_column("audio", Audio(sampling_rate=SAMPLE_RATE))
-            out = []
-            for row in split:
-                label = parse_ravdess_label(row)
-                if label is None:
-                    continue
-                out.append({
-                    "audio": np.asarray(row["audio"]["array"], dtype=np.float32),
-                    "label": label,
-                    "source": "ravdess",
-                })
-            print(f"  RAVDESS loaded ({len(out)} samples)")
-            return out
+            out += _load_one(name, "ravdess", parse_ravdess_label)
+            break
         except Exception as e:
-            last_err = e
-            print(f"    failed: {type(e).__name__}: {str(e)[:200]}")
-    raise RuntimeError(f"Could not load RAVDESS: {last_err}")
-
-
-def load_cremad() -> list[dict]:
-    candidates = ["AbstractTTS/CREMA-D"]
-    last_err = None
-    for name in candidates:
-        try:
-            print(f"  trying CREMA-D: {name}")
-            ds = load_dataset(name)
-            split = ds["train"] if "train" in ds else list(ds.values())[0]
-            split = split.cast_column("audio", Audio(sampling_rate=SAMPLE_RATE))
-            out = []
-            for row in split:
-                label = parse_cremad_label(row)
-                if label is None:
-                    continue
-                out.append({
-                    "audio": np.asarray(row["audio"]["array"], dtype=np.float32),
-                    "label": label,
-                    "source": "cremad",
-                })
-            print(f"  CREMA-D loaded ({len(out)} samples)")
-            return out
-        except Exception as e:
-            last_err = e
-            print(f"    failed: {type(e).__name__}: {str(e)[:200]}")
-    print(f"  CREMA-D unavailable, continuing without it: {last_err}")
-    return []
+            print(f"    ravdess {name} failed: {type(e).__name__}: {str(e)[:120]}")
+    try:
+        out += _load_one("AbstractTTS/CREMA-D", "cremad", parse_cremad_label)
+    except Exception as e:
+        print(f"    cremad failed: {type(e).__name__}: {str(e)[:120]}")
+    try:
+        out += _load_one("AbstractTTS/SAVEE", "savee", parse_savee_label)
+    except Exception as e:
+        print(f"    savee failed: {type(e).__name__}: {str(e)[:120]}")
+    if not out:
+        raise RuntimeError("No voice data loaded.")
+    return out
 
 
 def stratified_split(records: list[dict], train_frac: float, val_frac: float, seed: int = 42):
-    """Stratified train/val/test split by label with reproducible permutation."""
     rng = np.random.default_rng(seed)
     by_label: dict[int, list[int]] = {}
     for i, r in enumerate(records):
         by_label.setdefault(r["label"], []).append(i)
     train_idx, val_idx, test_idx = [], [], []
-    for label, idxs in by_label.items():
+    for cls, idxs in by_label.items():
         idxs = list(idxs)
         rng.shuffle(idxs)
         n = len(idxs)
@@ -170,28 +164,24 @@ def stratified_split(records: list[dict], train_frac: float, val_frac: float, se
     return [records[i] for i in train_idx], [records[i] for i in val_idx], [records[i] for i in test_idx]
 
 
-def spec_augment(mel: np.ndarray, freq_mask: int = 18, time_mask: int = 25, n_masks: int = 2) -> np.ndarray:
-    """Apply SpecAugment-style time and frequency masks in place."""
+def spec_augment(mel: np.ndarray, freq_mask: int = 24, time_mask: int = 30, n_masks: int = 2) -> np.ndarray:
     out = mel.copy()
     n_freq, n_time = out.shape
+    fill = float(out.min())
     for _ in range(n_masks):
         if freq_mask > 0:
             f = np.random.randint(0, freq_mask + 1)
             f0 = np.random.randint(0, max(1, n_freq - f))
-            out[f0:f0 + f, :] = out.min()
+            out[f0:f0 + f, :] = fill
         if time_mask > 0:
             t = np.random.randint(0, time_mask + 1)
             t0 = np.random.randint(0, max(1, n_time - t))
-            out[:, t0:t0 + t] = out.min()
+            out[:, t0:t0 + t] = fill
     return out
 
 
 class CombinedVoiceDataset(Dataset):
-    """
-    Pre-computes mel + stats features once (CPU bound), then serves cached tensors.
-    Augmentation happens at the mel-tensor level (SpecAugment) so we keep variation
-    across epochs without recomputing librosa features each time.
-    """
+    """Pre-computes mel + stats once; serves cached tensors with optional augment."""
 
     def __init__(self, records: list[dict], augment: bool = False):
         self.augment = augment
@@ -220,7 +210,41 @@ class CombinedVoiceDataset(Dataset):
         )
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def _mixup_batch(mel: torch.Tensor, stats: torch.Tensor, y: torch.Tensor, alpha: float):
+    lam = float(np.random.beta(alpha, alpha))
+    lam = max(lam, 1 - lam)
+    perm = torch.randperm(mel.size(0), device=mel.device)
+    mel_mix = lam * mel + (1 - lam) * mel[perm]
+    stats_mix = lam * stats + (1 - lam) * stats[perm]
+    return mel_mix, stats_mix, y, y[perm], lam
+
+
+def warmup_cosine_lr(epoch: int, base_lr: float, total_epochs: int, warmup_epochs: int) -> float:
+    if epoch < warmup_epochs:
+        return base_lr * (epoch + 1) / max(warmup_epochs, 1)
+    progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
+    return 0.5 * base_lr * (1 + math.cos(math.pi * progress))
+
+
+class EMA:
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    def update(self, model: nn.Module):
+        for k, v in model.state_dict().items():
+            if v.dtype.is_floating_point:
+                self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1 - self.decay)
+            else:
+                self.shadow[k].copy_(v)
+
+    def apply_to(self, model: nn.Module):
+        out = copy.deepcopy(model)
+        out.load_state_dict(self.shadow, strict=True)
+        return out
+
+
+def train_one_epoch(model, loader, criterion, optimizer, device, ema, mixup_alpha):
     model.train()
     total_loss = 0.0
     n = 0
@@ -228,11 +252,13 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
         mel = mel.to(device, non_blocking=True)
         stats = stats.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+        mel_mix, stats_mix, ya, yb, lam = _mixup_batch(mel, stats, labels, mixup_alpha)
         optimizer.zero_grad()
-        logits = model(mel, stats)
-        loss = criterion(logits, labels)
+        logits = model(mel_mix, stats_mix)
+        loss = lam * criterion(logits, ya) + (1 - lam) * criterion(logits, yb)
         loss.backward()
         optimizer.step()
+        ema.update(model)
         total_loss += loss.item() * mel.size(0)
         n += mel.size(0)
     return total_loss / max(n, 1)
@@ -266,11 +292,14 @@ def evaluate(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--epochs", type=int, default=120)
+    parser.add_argument("--warmup-epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
-    parser.add_argument("--patience", type=int, default=12)
+    parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--mixup-alpha", type=float, default=0.2)
+    parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--out", type=str, default="saved_models/voice_best.pt")
     args = parser.parse_args()
@@ -279,11 +308,7 @@ def main():
     print(f"Device: {device}")
 
     print("Loading datasets...")
-    records = []
-    records += load_ravdess()
-    records += load_cremad()
-    if not records:
-        raise RuntimeError("No voice data loaded.")
+    records = load_corpora()
     print(f"Total samples after combination: {len(records)}")
 
     train_recs, val_recs, test_recs = stratified_split(records, 0.70, 0.15)
@@ -311,13 +336,13 @@ def main():
 
     model = VoiceEmotionCNN(num_classes=len(VOICE_CLASSES), stat_features=STAT_FEATURES).to(device)
     print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
+    ema = EMA(model, decay=args.ema_decay)
 
     train_labels_arr = np.array([r["label"] for r in train_recs])
     cw = compute_class_weight("balanced", classes=np.arange(len(VOICE_CLASSES)), y=train_labels_arr)
     weight_tensor = torch.tensor(cw, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.05)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,18 +354,23 @@ def main():
     history = []
 
     for epoch in range(1, args.epochs + 1):
+        lr = warmup_cosine_lr(epoch - 1, args.lr, args.epochs, args.warmup_epochs)
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr
+
         t0 = time.time()
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val = evaluate(model, val_loader, criterion, device)
-        scheduler.step()
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device,
+                                     ema, args.mixup_alpha)
+        ema_model = ema.apply_to(model)
+        val = evaluate(ema_model, val_loader, criterion, device)
         et = time.time() - t0
         print(
-            f"Epoch {epoch:02d}/{args.epochs} "
+            f"Epoch {epoch:03d}/{args.epochs} lr={lr:.2e} "
             f"train_loss={train_loss:.4f} val_loss={val['loss']:.4f} "
             f"val_f1={val['f1_macro']:.4f} val_acc={val['accuracy']:.4f} time={et:.1f}s"
         )
         history.append({
-            "epoch": epoch, "train_loss": train_loss,
+            "epoch": epoch, "lr": lr, "train_loss": train_loss,
             "val_loss": val["loss"], "val_f1": val["f1_macro"], "val_acc": val["accuracy"],
         })
 
@@ -349,7 +379,7 @@ def main():
             best_epoch = epoch
             epochs_since_improve = 0
             torch.save({
-                "model_state": model.state_dict(),
+                "model_state": ema_model.state_dict(),
                 "classes": VOICE_CLASSES,
                 "stat_features": STAT_FEATURES,
                 "val_f1": best_f1,
@@ -364,15 +394,16 @@ def main():
                 break
 
     state = torch.load(out_path, map_location=device, weights_only=False)
-    model.load_state_dict(state["model_state"])
-    test = evaluate(model, test_loader, criterion, device)
+    eval_model = VoiceEmotionCNN(num_classes=len(VOICE_CLASSES), stat_features=STAT_FEATURES).to(device)
+    eval_model.load_state_dict(state["model_state"])
+    test = evaluate(eval_model, test_loader, criterion, device)
     print("\nTest results:")
     print(f"  f1_macro: {test['f1_macro']:.4f}")
     print(f"  accuracy: {test['accuracy']:.4f}")
     print(classification_report(test["labels"], test["preds"], target_names=VOICE_CLASSES, zero_division=0))
 
     metrics = {
-        "datasets": ["RAVDESS", "CREMA-D"],
+        "datasets": list(counts_by_source.keys()),
         "best_epoch": best_epoch,
         "val_f1": best_f1,
         "test_f1_macro": test["f1_macro"],
@@ -382,7 +413,8 @@ def main():
                                                 zero_division=0, output_dict=True),
         "history": history,
         "classes": VOICE_CLASSES,
-        "params": int(sum(p.numel() for p in model.parameters())),
+        "params": int(sum(p.numel() for p in eval_model.parameters())),
+        "ema_decay": args.ema_decay,
     }
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)

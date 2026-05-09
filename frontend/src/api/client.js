@@ -43,3 +43,28 @@ export function getModelMetrics() {
 export function getHealth() {
   return request('/api/health')
 }
+
+export function listQuestionCategories() {
+  return request('/api/questions/categories')
+}
+
+export function getQuestionSet(n = 5, category = null, seed = null) {
+  return request('/api/questions/set', {
+    method: 'POST',
+    body: JSON.stringify({ n, category, seed }),
+  })
+}
+
+export function recordQuestionEvent(sessionId, payload) {
+  return request(`/api/session/${sessionId}/question`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function recordFaceTicks(sessionId, ticks) {
+  return request(`/api/session/${sessionId}/face-ticks`, {
+    method: 'POST',
+    body: JSON.stringify({ ticks }),
+  })
+}

@@ -106,6 +106,30 @@ class InsightItem(BaseModel):
     metric: str
 
 
+class PerQuestionItem(BaseModel):
+    question_id: str
+    text: str
+    category: str
+    difficulty: str
+    target_seconds: int
+    answered_seconds: float
+    avg_confidence: float
+    avg_engagement: float
+    word_count: int
+    filler_count: int
+
+
+class FaceDynamicsBlock(BaseModel):
+    available: bool = False
+    tick_count: int = 0
+    head_yaw_std: float = 0.0
+    head_pitch_std: float = 0.0
+    avg_eye_openness: float = 1.0
+    avg_smile: float = 0.0
+    looking_pct: float = 100.0
+    ticks: list[dict] = Field(default_factory=list)
+
+
 class AnalysisResponse(BaseModel):
     session_id: str
     duration_seconds: float
@@ -117,6 +141,8 @@ class AnalysisResponse(BaseModel):
     voice: VoiceBlock
     face: FaceBlock
     insights: list[InsightItem]
+    per_question: list[PerQuestionItem] = Field(default_factory=list)
+    face_dynamics: FaceDynamicsBlock = Field(default_factory=FaceDynamicsBlock)
 
 
 class SessionListItem(BaseModel):
@@ -147,3 +173,37 @@ class HealthResponse(BaseModel):
     status: str
     uptime_seconds: float
     models: dict[str, bool]
+
+
+class QuestionItem(BaseModel):
+    id: str
+    text: str
+    category: str
+    difficulty: str
+    target_seconds: int
+
+
+class QuestionSetRequest(BaseModel):
+    n: int = Field(default=5, ge=1, le=20)
+    category: Optional[str] = None
+    seed: Optional[int] = None
+
+
+class QuestionEventRequest(BaseModel):
+    question_id: str = Field(min_length=1, max_length=64)
+    started_at: float
+    ended_at: Optional[float] = None
+
+
+class FaceMetricsTick(BaseModel):
+    timestamp: float
+    head_yaw: float = 0.0
+    head_pitch: float = 0.0
+    head_roll: float = 0.0
+    eye_openness: float = 1.0
+    smile: float = 0.0
+    looking_at_camera: float = 1.0
+
+
+class FaceMetricsBatch(BaseModel):
+    ticks: list[FaceMetricsTick]

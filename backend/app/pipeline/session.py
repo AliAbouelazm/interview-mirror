@@ -45,8 +45,29 @@ CREATE TABLE IF NOT EXISTS frames (
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS question_events (
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    question_id TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    PRIMARY KEY (session_id, seq),
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS face_ticks (
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    timestamp REAL NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (session_id, seq),
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_frames_session ON frames(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
+CREATE INDEX IF NOT EXISTS idx_qevents_session ON question_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_face_ticks_session ON face_ticks(session_id);
 """
 
 
@@ -57,6 +78,8 @@ class LiveSession:
     started_at: float
     frames: list[dict] = field(default_factory=list)
     seq: int = 0
+    question_events: list[dict] = field(default_factory=list)
+    face_ticks: list[dict] = field(default_factory=list)
 
 
 class SessionStore:
@@ -107,12 +130,26 @@ class SessionStore:
         payload["seq"] = sess.seq
         sess.frames.append(payload)
 
+    async def record_question_event(self, session_id: str, event: dict) -> None:
+        sess = self._live.get(session_id)
+        if not sess:
+            return
+        sess.question_events.append(event)
+
+    async def record_face_ticks(self, session_id: str, ticks: list[dict]) -> None:
+        sess = self._live.get(session_id)
+        if not sess:
+            return
+        sess.face_ticks.extend(ticks)
+
     async def end(self, session_id: str) -> Optional[dict]:
         sess = self._live.pop(session_id, None)
         if not sess:
             return None
         ended_at = time.time()
         analysis = analyse_session(sess.frames, sess.started_at, ended_at)
+        analysis["per_question"] = self._compute_per_question(sess)
+        analysis["face_dynamics"] = self._compute_face_dynamics(sess)
         if self._db:
             await self._db.execute(
                 "UPDATE sessions SET ended_at=?, duration_seconds=?, avg_confidence=?, "
@@ -131,8 +168,72 @@ class SessionStore:
                     "INSERT OR REPLACE INTO frames(session_id, seq, timestamp, payload_json) VALUES (?, ?, ?, ?)",
                     (session_id, f["seq"], f.get("timestamp", time.time()), json.dumps(f)),
                 )
+            for i, ev in enumerate(sess.question_events):
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO question_events(session_id, seq, question_id, started_at, ended_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, i, ev.get("question_id", ""), ev.get("started_at", 0), ev.get("ended_at")),
+                )
+            for i, t in enumerate(sess.face_ticks):
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO face_ticks(session_id, seq, timestamp, payload_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (session_id, i, t.get("timestamp", 0), json.dumps(t)),
+                )
             await self._db.commit()
         return analysis
+
+    def _compute_per_question(self, sess: LiveSession) -> list[dict]:
+        from app.data.questions import get_question
+        per_q: list[dict] = []
+        for ev in sess.question_events:
+            qid = ev.get("question_id")
+            q = get_question(qid) if qid else None
+            if q is None:
+                continue
+            start = ev.get("started_at", 0)
+            end = ev.get("ended_at") or sess.frames[-1]["timestamp"] if sess.frames else start
+            window = [f for f in sess.frames if start <= f.get("timestamp", 0) < end]
+            if not window:
+                continue
+            from statistics import mean
+            avg_conf = round(mean([f.get("confidence_score", 0) for f in window]), 1)
+            avg_eng = round(mean([f.get("engagement_score", 0) for f in window]), 1)
+            words = sum(len((f.get("transcript_chunk") or "").split()) for f in window)
+            fillers = sum(len(f.get("flagged_phrases", [])) for f in window)
+            per_q.append({
+                "question_id": qid,
+                "text": q["text"],
+                "category": q["category"],
+                "difficulty": q["difficulty"],
+                "target_seconds": q["target_seconds"],
+                "answered_seconds": round(end - start, 1),
+                "avg_confidence": avg_conf,
+                "avg_engagement": avg_eng,
+                "word_count": words,
+                "filler_count": fillers,
+            })
+        return per_q
+
+    def _compute_face_dynamics(self, sess: LiveSession) -> dict:
+        if not sess.face_ticks:
+            return {"available": False, "ticks": []}
+        from statistics import mean, pstdev
+        yaw = [t.get("head_yaw", 0.0) for t in sess.face_ticks]
+        pitch = [t.get("head_pitch", 0.0) for t in sess.face_ticks]
+        eye = [t.get("eye_openness", 1.0) for t in sess.face_ticks]
+        smile = [t.get("smile", 0.0) for t in sess.face_ticks]
+        looking = [t.get("looking_at_camera", 1.0) for t in sess.face_ticks]
+        return {
+            "available": True,
+            "tick_count": len(sess.face_ticks),
+            "head_yaw_std": round(pstdev(yaw) if len(yaw) > 1 else 0.0, 3),
+            "head_pitch_std": round(pstdev(pitch) if len(pitch) > 1 else 0.0, 3),
+            "avg_eye_openness": round(mean(eye), 3),
+            "avg_smile": round(mean(smile), 3),
+            "looking_pct": round(100.0 * mean(looking), 1),
+            "ticks": sess.face_ticks[-300:],
+        }
 
     async def get_analysis(self, session_id: str) -> Optional[dict]:
         if self._db is None:

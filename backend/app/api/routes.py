@@ -10,14 +10,19 @@ from fastapi import APIRouter, HTTPException, Request
 from app.api.schemas import (
     AnalysisResponse,
     EndSessionResponse,
+    FaceMetricsBatch,
     HealthResponse,
     ModelMetrics,
     ModelMetricsResponse,
+    QuestionEventRequest,
+    QuestionItem,
+    QuestionSetRequest,
     SessionListItem,
     StartSessionRequest,
     StartSessionResponse,
     TimelineResponse,
 )
+from app.data import questions as qbank
 
 
 router = APIRouter()
@@ -106,6 +111,43 @@ async def model_metrics(request: Request):
         except Exception:
             fusion = None
     return ModelMetricsResponse(face=face, voice=voice, fusion=fusion)
+
+
+@router.get("/questions", response_model=list[QuestionItem])
+async def list_questions(category: str | None = None):
+    if category:
+        return qbank.by_category(category)
+    return qbank.all_questions()
+
+
+@router.post("/questions/set", response_model=list[QuestionItem])
+async def question_set(req: QuestionSetRequest):
+    return qbank.random_set(n=req.n, category=req.category, seed=req.seed)
+
+
+@router.get("/questions/categories")
+async def question_categories():
+    return {"categories": qbank.CATEGORIES}
+
+
+@router.post("/session/{session_id}/question")
+async def record_question(session_id: str, req: QuestionEventRequest, request: Request):
+    store = request.app.state.session_store
+    if not store.is_live(session_id):
+        raise HTTPException(status_code=404, detail="Session not active")
+    if qbank.get_question(req.question_id) is None:
+        raise HTTPException(status_code=400, detail="Unknown question id")
+    await store.record_question_event(session_id, req.model_dump())
+    return {"status": "ok"}
+
+
+@router.post("/session/{session_id}/face-ticks")
+async def record_face_ticks(session_id: str, batch: FaceMetricsBatch, request: Request):
+    store = request.app.state.session_store
+    if not store.is_live(session_id):
+        raise HTTPException(status_code=404, detail="Session not active")
+    await store.record_face_ticks(session_id, [t.model_dump() for t in batch.ticks])
+    return {"status": "ok", "received": len(batch.ticks)}
 
 
 @router.get("/health", response_model=HealthResponse)
