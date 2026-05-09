@@ -144,18 +144,47 @@ Permissions are requested up front from the home page. If denied, the app explai
 
 ## Deployment
 
-Backend on HuggingFace Spaces (Docker):
+The backend deploys as a Docker Space on HuggingFace; the frontend deploys as a static SPA on Vercel.
 
-1. Push this repository to a Space configured as a Docker SDK Space.
-2. The included `backend/Dockerfile` installs ffmpeg, libsndfile, mediapipe deps and serves uvicorn on port 7860.
-3. Trained checkpoints live in `backend/saved_models/`. Whisper-base auto-downloads on first run.
-4. SQLite session DB lives in `/data/sessions.db` inside the container. Mount a Persistent Storage volume on the Space to keep past sessions across rebuilds.
+### Backend on HuggingFace Spaces
 
-Frontend on Vercel:
+Create the Space:
+1. Go to https://huggingface.co/new-space
+2. Owner: your account. Space name: `interview-mirror` (or whatever).
+3. License: MIT. SDK: **Docker**. Hardware: CPU basic (free) is enough.
+4. (Optional, paid) Add Persistent Storage 1 GB so past sessions survive container rebuilds.
 
-1. Import the repository and pick the `frontend` directory as the project root.
-2. Set environment variables `VITE_API_URL` and `VITE_WS_URL` to your HF Space URL (`https://<user>-<space>.hf.space` and `wss://<user>-<space>.hf.space`).
-3. Vercel runs `npm run build` and serves the SPA. The included `vercel.json` rewrites every route to `index.html`.
+Push the `backend/` subtree to the Space. From the repo root:
+```bash
+git remote add hf-space https://huggingface.co/spaces/<USER>/interview-mirror
+git subtree push --prefix=backend hf-space main
+```
+The Space runs Docker against `backend/Dockerfile`, which installs ffmpeg + libsndfile + mediapipe deps and serves uvicorn on port 7860. Whisper-base auto-downloads on first run and caches at `/data/.cache`.
+
+In the Space settings → Variables and secrets, set:
+- `CORS_ORIGINS` = your Vercel URL (e.g. `https://interview-mirror.vercel.app`)
+- `SESSION_DB_PATH` = `/data/sessions.db` if you mounted persistent storage
+
+The Space takes 5-10 minutes for the first build (Docker layer caching speeds up later pushes).
+
+### Frontend on Vercel
+
+1. Import the repo at https://vercel.com/new.
+2. Set the **Root Directory** to `frontend`.
+3. Framework preset: Vite. Build command and output directory are picked up from `vercel.json`.
+4. Add environment variables:
+   - `VITE_API_URL` = `https://<USER>-<space>.hf.space`
+   - `VITE_WS_URL`  = `wss://<USER>-<space>.hf.space`
+5. Deploy.
+
+The SPA fetches sessions, questions, and analysis through `/api/...` and opens a WebSocket at `/ws/{sessionId}` against the URLs above. Camera and microphone require HTTPS; both Vercel and HF Spaces serve HTTPS by default.
+
+### Local production-style run with Docker
+```bash
+cd backend
+docker build -t interview-mirror .
+docker run --rm -p 7860:7860 -v $(pwd)/data:/data interview-mirror
+```
 
 ## Live demo
 
