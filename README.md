@@ -188,4 +188,4 @@ docker run --rm -p 7860:7860 -v $(pwd)/data:/data interview-mirror
 
 ## Live demo
 
-Add the deployed URL here once deployment is complete.
+https://mirror.aliabouelazm.com
